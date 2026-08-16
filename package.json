@@ -1,0 +1,53 @@
+{
+  "name": "pi-feishu-notify",
+  "version": "0.1.0",
+  "description": "pi 主对话 ⇄ 飞书双向桥：任务完成推送飞书通知，飞书里回复通知即可远程指挥对应 pi 会话继续执行。不依赖 lark-cli，基于官方 SDK 长连接。",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "feishu",
+    "lark",
+    "notify",
+    "bridge",
+    "remote"
+  ],
+  "license": "MIT",
+  "author": "xiaohuzai",
+  "homepage": "https://github.com/xiaohuzai/pi-feishu-notify#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiaohuzai/pi-feishu-notify.git"
+  },
+  "bugs": {
+    "url": "https://github.com/xiaohuzai/pi-feishu-notify/issues"
+  },
+  "type": "module",
+  "files": [
+    "extensions/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "clean": "rm -rf node_modules dist"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.73.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.84.1",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}
