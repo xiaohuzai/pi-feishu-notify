@@ -9,6 +9,7 @@
  *
  * 进程级单例 FeishuClient（跨 session 共享 WebSocket consumer）。
  */
+import { basename } from 'node:path';
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -79,10 +80,13 @@ function extractAssistantText(content: unknown): string {
 export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // 每个 session 关联的配置（session_start 时刷新）
   const configs = new Map<string, FeishuNotifyConfig>();
+  const sessionCwds = new Map<string, string>();
   const router = new NotificationRouter();
   const dedup = new ClaimDedup();
   const registry = new SessionRegistry();
   let client: FeishuClient | undefined;
+  // 最近一次 agent 回复文本（agent_end 时更新，agent_settled 时发送）
+  let lastAssistantText = '';
 
   /** 获取当前 session 的 sid + 是否允许发送。 */
   function sessionInfo(ctx: ExtensionContext): { sid: string; cfg: FeishuNotifyConfig } {
@@ -139,6 +143,12 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
 
   /** 回注指令到目标 session。 */
   function injectReply(sid: string, text: string, msg: FeishuMessage): void {
+    // 目标 session 已结束（configs 中已移除）→ 无法回注，友好提示
+    if (!configs.has(sid)) {
+      log('reply-session-gone', { to: sid }, 'WARN');
+      sendReceipt(sid, '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。');
+      return;
+    }
     try {
       const prompt =
         `[feishu-notify] 飞书用户${msg.senderName ? `「${msg.senderName}」` : ''}回复了通知，` +
@@ -146,7 +156,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
       sendReceipt(sid, `已收到你的回复：「${text}」，正在处理…`);
     } catch (err) {
-      log('inject-failed', { error: err instanceof Error ? err.message : String(err) }, 'ERROR');
+      // print 模式（-p）收尾时 session 可能已关闭导致 ctx stale，
+      // 此时回注失败不影响通知/路由，仅记日志即可。
+      log('inject-failed', { error: err instanceof Error ? err.message : String(err) }, 'WARN');
     }
   }
 
@@ -154,7 +166,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   function sendReceipt(sid: string, text: string): void {
     const cfg = configs.get(sid);
     if (!cfg || cfg.receipt === false) return;
-    void client?.sendText(text, { userId: cfg.userId, chatId: cfg.chatId }).then((r) => {
+    const project = basename(sessionCwds.get(sid) ?? '') || '?';
+    void client?.sendText(`${text}\n\n项目: ${project}`, { userId: cfg.userId, chatId: cfg.chatId }).then((r) => {
       if (!r.ok) log('receipt-failed', { error: r.error }, 'ERROR');
     });
   }
@@ -165,6 +178,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     const sid = ctx.sessionManager.getSessionId();
     const cfg = loadConfig(ctx.cwd);
     configs.set(sid, cfg);
+    sessionCwds.set(sid, ctx.cwd);
     registry.register(sid, ctx.cwd);
     log('session-start', { sid });
 
@@ -175,6 +189,21 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     ensureSubscribed(cfg);
   });
 
+  pi.on('agent_end', async (_event, ctx) => {
+    // 记录最近一次 assistant 文本，供 agent_settled 发通知用
+    const branch = ctx.sessionManager.getBranch();
+    for (let i = branch.length - 1; i >= 0; i--) {
+      const entry = branch[i];
+      if (entry?.type === 'message' && entry.message.role === 'assistant') {
+        const text = extractAssistantText(entry.message.content);
+        if (text) {
+          lastAssistantText = text;
+          break;
+        }
+      }
+    }
+  });
+
   pi.on('agent_settled', (_event, ctx) => {
     const { sid, cfg } = sessionInfo(ctx);
     if (!cfg.enabled || !canSend(cfg)) return;
@@ -182,18 +211,18 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     // 只在空闲时通知（避免 stream 中打扰）
     if (!ctx.isIdle()) return;
 
-    // 取最近一条 assistant 消息作为通知内容
-    const branch = ctx.sessionManager.getBranch();
-    let lastAssistant: string | undefined;
-    for (let i = branch.length - 1; i >= 0; i--) {
-      const entry = branch[i];
-      if (entry?.type === 'message' && entry.message.role === 'assistant') {
-        lastAssistant = extractAssistantText(entry.message.content);
-        break;
-      }
-    }
-    const summary = lastAssistant ?? '任务已完成';
-    const text = `✅ [pi] 任务完成\n${summary}\n\n回复本消息可继续指挥该会话。`;
+    // 通知文本：带上项目名 + 会话 ID（前 8 位）+ 时间，多任务可区分
+    const project = basename(ctx.cwd) || ctx.cwd;
+    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const lines = [
+      '✅ pi 主对话已完成',
+      `项目: ${project}`,
+      `会话: ${sid.slice(0, 8)}`,
+      `时间: ${time}`,
+    ];
+    if (lastAssistantText) lines.push('', lastAssistantText);
+    lines.push('', '回复本消息可继续指挥该会话。');
+    const text = lines.join('\n');
 
     void client?.sendText(text, { userId: cfg.userId, chatId: cfg.chatId }).then((r) => {
       if (r.ok && r.messageId) {
@@ -208,6 +237,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   pi.on('session_shutdown', (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     configs.delete(sid);
+    sessionCwds.delete(sid);
     registry.unregister(sid);
     log('session-shutdown', { sid });
   });
