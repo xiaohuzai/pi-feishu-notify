@@ -33,9 +33,9 @@ pi install ./path/to/pi-feishu-notify
    - **权限**：`im:message`、`im:message:send_as_bot`（发送消息）
    - **长连接**：事件订阅方式选择 **使用长连接接收事件**（SDK WebSocket 方式，无需公网 URL）
 
-3. 拿到应用的 `App ID` 和 `App Secret`，并确定通知目标：
-   - **私聊**：把机器人加为联系人，获取你的 `open_id`（通过 [获取用户ID](https://open.feishu.cn/document/uAjLw4CM/ugTN1YjL4UTN24CO1UjN/trouble-shooting/get-uid) 工具）
-   - **群聊**：创建群聊并拉机器人进群，获取群 `chat_id`（机器人发一条消息后，用 [获取群信息](https://open.feishu.cn/document/server-docs/im-v1/chat/get) 查询）
+3. 拿到应用的 `App ID` 和 `App Secret`，并把机器人加为联系人（私聊）或拉进群聊（群通知）。
+
+> 通知目标 `userId`（open_id）和 `chatId`（群 chat_id）**无需手动获取**：配置好并启动后，给机器人发一条消息即可自动识别（见下文「userId / chatId 怎么获取」）。
 
 ## 配置
 
@@ -47,8 +47,6 @@ pi install ./path/to/pi-feishu-notify
     "enabled": true,
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
-    "userId": "ou_xxxxxxxx",        // 私聊：你的 open_id（与 chatId 二选一，userId 优先）
-    "chatId": "oc_xxxxxxxx",        // 群聊：群 chat_id
     "replyEnabled": true,           // 是否允许回复回注
     "receipt": true,                // 转达后回执一条"已收到"
     "requireMention": false,        // 群聊时是否要求 @ 机器人
@@ -60,6 +58,8 @@ pi install ./path/to/pi-feishu-notify
   }
 }
 ```
+
+> **`userId` / `chatId` 不是必填**：不配置时，扩展会自动识别通知目标——给机器人发一条私聊消息即识别出 `userId`，群里发消息即识别出 `chatId`，并自动用于发送（可用 `/feishu-notify bind` 把识别结果固定写入配置）。只有想锁定发送目标时才手动配置。
 
 > **安全建议**：`appSecret` 使用 `${ENV_VAR}` 占位符，通过环境变量注入，避免明文写入配置文件。支持 `${NAME}` 和 `${NAME:-fallback}` 语法。
 
@@ -73,7 +73,7 @@ pi install ./path/to/pi-feishu-notify
 识别到后：
 
 - **自动回退生效**：如果 settings 里没配 `userId`，通知会自动发到刚识别出来的私聊用户（首次会自动提示可用 `/feishu-notify bind` 持久化）。
-- **`/feishu-notify whoami`**：查看已识别到的 `userId` / `chatId`，方便手动填到配置。
+- **`/feishu-notify whoami`**：查看当前已识别的 `userId` / `chatId`（一般不需要，排查或想手动锁定目标时用）。
 - **`/feishu-notify bind`**：把识别到的值自动写入项目 `.pi/settings.json`（只补写缺失字段，不覆盖已有配置），重启或 `/reload` 后固定生效。
 - **重启也能记住**：识别结果会存到 `~/.pi/agent/feishu-notify-discovered.json`。下次启动时若 settings 仍未配置 `userId` 但已识别过，pi 里会弹一条一次性提示，提醒你用 `/feishu-notify bind` 一键写入。
 
