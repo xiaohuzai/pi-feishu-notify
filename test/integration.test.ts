@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { recordDiscovered } from '../src/discovery.js';
 
 // 隔离测试用 home：把 ~/.pi/agent 指向临时目录
 const TMP_HOME = '/tmp/pi-fn-it';
@@ -17,14 +18,14 @@ vi.stubGlobal('__PI_TEST_HOME', TMP_HOME);
 import { stateDir } from '../src/state.js';
 
 function cleanupState() {
-  for (const f of ['feishu-notify-router.json', 'feishu-notify-dedup.json', 'feishu-notify-sessions.json']) {
+  for (const f of ['feishu-notify-router.json', 'feishu-notify-dedup.json', 'feishu-notify-sessions.json', 'feishu-notify-discovered.json']) {
     try {
       rmSync(join(stateDir(), f), { force: true });
     } catch {
       // noop
     }
   }
-  for (const d of ['feishu-notify-router.lock', 'feishu-notify-dedup.lock', 'feishu-notify-sessions.lock']) {
+  for (const d of ['feishu-notify-router.lock', 'feishu-notify-dedup.lock', 'feishu-notify-sessions.lock', 'feishu-notify-discovered.lock']) {
     try {
       rmSync(join(stateDir(), d), { recursive: true, force: true });
     } catch {
@@ -117,5 +118,38 @@ describe('extension integration', () => {
     const call = registerCommand.mock.calls.find((c: unknown[]) => c[0] === 'feishu-notify');
     expect(call).toBeDefined();
     expect(typeof call?.[1]?.handler).toBe('function');
+  });
+
+  it('已识别但未配 userId 时，session_start 弹一次性 bind 提示', async () => {
+    // 先持久化一条识别结果
+    recordDiscovered('ou_hint', 'oc_hint_chat');
+
+    const notify = vi.fn();
+    const pi = {
+      on: vi.fn(),
+      registerCommand: vi.fn(),
+      sendUserMessage: vi.fn(),
+      sendMessage: vi.fn(),
+    } as unknown as ExtensionAPI;
+    factory(pi);
+
+    const startHandler = (pi.on as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c: unknown[]) => c[0] === 'session_start',
+    )?.[1] as (e: unknown, ctx: ExtensionContext) => void | Promise<void>;
+
+    // TUI 上下文 + 未配置 userId → 应弹出提示
+    await startHandler?.(
+      { type: 'session_start', reason: 'startup' },
+      makeCtx({ hasUI: true, ui: { notify } as unknown as ExtensionContext['ui'] }),
+    );
+    expect(notify).toHaveBeenCalledTimes(1);
+    expect(String(notify.mock.calls[0]?.[0] ?? '')).toContain('bind');
+
+    // 第二次 session_start（同进程）→ 只提示一次
+    await startHandler?.(
+      { type: 'session_start', reason: 'new' },
+      makeCtx({ hasUI: true, ui: { notify } as unknown as ExtensionContext['ui'] }),
+    );
+    expect(notify).toHaveBeenCalledTimes(1);
   });
 });

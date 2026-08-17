@@ -12,7 +12,7 @@
 - ✅ **双向桥**：pi → 飞书（通知）/ 飞书 → pi（指令）
 - ✅ **跨进程去重**：多 pi 进程场景下同一消息只处理一次
 - ✅ **崩溃自愈**：自动清理死进程残留状态
-- ✅ **配置灵活**：全局 + 项目级覆盖，支持环境变量插值，兼容旧 `lark-notify` 配置迁移
+- ✅ **配置灵活**：全局 + 项目级覆盖，支持环境变量插值，自动识别 userId/chatId
 
 ## 安装
 
@@ -54,16 +54,30 @@ pi install ./path/to/pi-feishu-notify
     "requireMention": false,        // 群聊时是否要求 @ 机器人
     "allowedSenderIds": [],         // 私聊白名单（open_id 列表），不填则只处理 p2p 单聊
     "allowedChatIds": [],           // 群聊白名单（chat_id 列表）
-    "includeSummary": true
+    "includeSummary": true,
+    "minDurationMs": 0,             // 任务最短时长（毫秒），>= 该值才发通知；0/缺省=不限制
+    "logLevel": "normal"             // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
   }
 }
 ```
 
 > **安全建议**：`appSecret` 使用 `${ENV_VAR}` 占位符，通过环境变量注入，避免明文写入配置文件。支持 `${NAME}` 和 `${NAME:-fallback}` 语法。
 
-### 旧配置迁移
+### userId / chatId 怎么获取？可以自动识别
 
-从 `pi-lark-notify` 迁移时，`appId` / `appSecret` / `domain` 会自动从旧的 `lark-notify` 节读取，无需改动 settings。
+`userId`（open_id）和 `chatId`（群 chat_id）不需要手动查。**只要你在飞书里给机器人发一条消息**，扩展就会自动记住：
+
+- **私聊**：你给机器人发一条消息 → 自动识别出你的 `userId`（open_id）
+- **群聊**：把机器人拉进群，在群里 @ 机器人发一条消息 → 自动识别出该群的 `chatId`
+
+识别到后：
+
+- **自动回退生效**：如果 settings 里没配 `userId`，通知会自动发到刚识别出来的私聊用户（首次会自动提示可用 `/feishu-notify bind` 持久化）。
+- **`/feishu-notify whoami`**：查看已识别到的 `userId` / `chatId`，方便手动填到配置。
+- **`/feishu-notify bind`**：把识别到的值自动写入项目 `.pi/settings.json`（只补写缺失字段，不覆盖已有配置），重启或 `/reload` 后固定生效。
+- **重启也能记住**：识别结果会存到 `~/.pi/agent/feishu-notify-discovered.json`。下次启动时若 settings 仍未配置 `userId` 但已识别过，pi 里会弹一条一次性提示，提醒你用 `/feishu-notify bind` 一键写入。
+
+> 提示：私聊自动回退是最顺滑的入门方式——配好 `appId/appSecret`、机器人加好友后发条消息，再把 task 交给 pi，通知就会发回来。
 
 ## 使用
 
@@ -83,7 +97,13 @@ pi install ./path/to/pi-feishu-notify
 
 2. **回复指挥**：在飞书里直接**回复**这条通知，输入你要的指令（无需 @ 机器人）。消息会注入到对应的 pi 会话继续执行，执行完成后会再收到新的通知。
 
-3. **手动通知**：在 pi 里执行 `/feishu-notify <消息>` 可手动发送一条通知到飞书；`/feishu-notify` 无参数时查看扩展状态。
+3. **手动通知**：在 pi 里执行 `/feishu-notify <消息>` 可手动发送一条通知到飞书；`/feishu-notify` 无参数时查看扩展状态（含是否静音、最短时长阈值、是否已自动识别 userId）。
+
+### 减少日志打扰 / 控制通知频率
+
+- **日志安静**：默认 `logLevel: 'normal'` 只输出警告和错误，日常任务完成的 `[feishu-notify] notification-sent {...}` 不再刷屏。想更安静设 `'quiet'`（只报错），需要排查设 `'verbose'`（含发送细节）。
+- **长任务才通知**：设置 `minDurationMs`（毫秒），任务从 `agent_start` 到 `agent_settled` 不足该时长则不发送。例如 `minDurationMs: 60000` 表示 1 分钟以内的短任务不打扰。
+- **按会话静音**：在 pi 里执行 `/feishu-notify off`（或 `mute`）静音当前会话，任务完成后不再自动发通知；`/feishu-notify on`（或 `unmute`）恢复。适合某些只想本地、不想推飞书的工作场景。
 
 ## 工作原理
 
@@ -114,6 +134,9 @@ pi-feishu-notify/
 │   ├── feishu.ts            # 飞书 SDK 客户端（发送 + 长连接，进程级单例）
 │   ├── router.ts            # 通知路由 + 跨进程去重
 │   ├── sessions.ts          # 会话注册表（崩溃自愈）
+│   ├── filter.ts            # 发送/日志过滤（minDurationMs、logLevel）
+│   ├── settings.ts          # 自动识别 ID 持久化（/feishu-notify bind）
+│   ├── discovery.ts         # 识别结果跨进程持久化（重启提示用）
 │   └── state.ts             # 状态文件原子读写 + 目录锁
 └── test/                    # 单元测试（vitest）
 ```
