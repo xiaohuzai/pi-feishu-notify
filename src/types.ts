@@ -30,6 +30,21 @@ export interface FeishuNotifyConfig {
   includeSummary?: boolean;
   /** 崩溃残留状态清理天数 */
   staleDays?: number;
+  /**
+   * 最短任务时长（毫秒）。仅当本次任务从 agent_start 到
+   * agent_settled 的耗时 >= 该值时才会发通知。
+   * 未配置 / 0：不限制，任何任务都发。
+   * 示例：minDurationMs: 60000 表示 1 分钟以上的任务才通知。
+   */
+  minDurationMs?: number;
+  /**
+   * 日志级别：
+   *  - 'quiet'   ：只输出错误（ERROR）
+   *  - 'normal'  ：输出警告和错误（WARN/ERROR），默认
+   *  - 'verbose' ：输出全部（INFO/WARN/ERROR，含 notification-sent 等细节）
+   * 设置为 'quiet' 或 'normal' 可减少通知日志对对话的干扰。
+   */
+  logLevel?: 'quiet' | 'normal' | 'verbose';
 }
 
 /** 飞书事件（SDK NormalizedMessage 的简化映射） */
