@@ -1,0 +1,66 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（如 0.3.0），不填则使用 package.json 当前版本'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - run: npm ci
+
+      - name: 校验 package.json 版本号
+        id: check
+        run: |
+          # 输入了版本号则 bump，否则用当前 package.json 版本
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            npm version ${{ github.event.inputs.version }} --no-git-tag-version
+          fi
+          echo "version=$(node -p \"require('./package.json').version\")" >> "$GITHUB_OUTPUT"
+
+      - name: 检查 npm 上是否已存在该版本
+        run: |
+          VERSION=${{ steps.check.outputs.version }}
+          if npm view pi-feishu-notify@$VERSION version >/dev/null 2>&1; then
+            echo "::error::版本 $VERSION 已存在于 npm，请换一个版本号"
+            exit 1
+          fi
+
+      - name: 校验（typecheck + test）
+        run: npm run typecheck && npm test
+
+      - name: Publish to npm
+        run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Git tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag v${{ steps.check.outputs.version }}
+          git push origin v${{ steps.check.outputs.version }}
+
+      - name: 提交版本号变更回 main
+        run: |
+          git add package.json package-lock.json
+          git commit -m "chore: release v${{ steps.check.outputs.version }} [skip ci]" || echo "无需提交"
+          git push origin main || echo "无变更可推"

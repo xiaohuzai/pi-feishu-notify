@@ -147,6 +147,10 @@ pi-feishu-notify/
 ## 卸载
 
 ```bash
+# npm 安装方式
+pi remove npm:pi-feishu-notify
+
+# git 安装方式
 pi remove git:github.com/xiaohuzai/pi-feishu-notify
 ```
 
