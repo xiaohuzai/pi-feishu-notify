@@ -17,7 +17,10 @@
 ## 安装
 
 ```bash
-# 通过 git 安装（推荐）
+# 通过 npm 安装（发布到 pi.dev/packages 社区目录）
+pi install npm:pi-feishu-notify
+
+# 或通过 git 安装
 pi install git:github.com/xiaohuzai/pi-feishu-notify
 
 # 或本地路径
