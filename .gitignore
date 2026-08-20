@@ -3,3 +3,6 @@ dist/
 *.log
 .DS_Store
 *.tmp
+
+# 项目本地配置（含个人 userId / open_id，不提交）
+.pi/

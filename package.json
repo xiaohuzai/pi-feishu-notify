@@ -1,6 +1,6 @@
 {
   "name": "pi-feishu-notify",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "pi 主对话 ⇄ 飞书双向桥：任务完成推送飞书通知，飞书里回复通知即可远程指挥对应 pi 会话继续执行。不依赖 lark-cli，基于官方 SDK 长连接。",
   "keywords": [
     "pi-package",
