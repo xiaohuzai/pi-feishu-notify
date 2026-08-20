@@ -29,7 +29,7 @@ export class FeishuConfigError extends Error {
 export interface FeishuClient {
   /** 发送文本消息，成功返回 message_id。 */
   sendText(text: string, cfg: { userId?: string; chatId?: string }): Promise<SendResult>;
-  /** 订阅消息事件，返回 unsubscribe。多 session 各自注册自己的 handler。 */
+  /** 订阅消息事件，返回 unsubscribe。单 handler 替换：新订阅会替换旧订阅。 */
   subscribe(handler: (msg: FeishuMessage) => void): () => void;
   /** 显式关闭连接（仅进程退出/测试清理使用）。 */
   close(): void;
@@ -84,6 +84,9 @@ function toFeishuMessage(msg: lark.NormalizedMessage): FeishuMessage {
 class SdkFeishuClient implements FeishuClient {
   private channel: lark.LarkChannel | null = null;
   private readonly subscribers = new Set<(msg: FeishuMessage) => void>();
+  /** 单 handler 替换：记录最近一次注册的 handler，新注册时先移除旧的。
+   *  这样 reload 后新扩展实例的 subscribe 会替换掉旧实例捕获 stale pi 的 handler。 */
+  private currentHandler: ((msg: FeishuMessage) => void) | null = null;
   private connected = false;
   private connectPromise: Promise<void> | null = null;
   private shuttingDown = false;
@@ -131,11 +134,17 @@ class SdkFeishuClient implements FeishuClient {
   }
 
   subscribe(handler: (msg: FeishuMessage) => void): () => void {
+    // 单 handler 替换：移除旧的（reload 后旧实例的 handler 捕获 stale pi，必须换掉）
+    if (this.currentHandler && this.currentHandler !== handler) {
+      this.subscribers.delete(this.currentHandler);
+    }
     this.subscribers.add(handler);
+    this.currentHandler = handler;
     void this.ensureChannel();
     // 常驻单例：unsubscribe 只移除 handler，不关闭 consumer。
     return () => {
       this.subscribers.delete(handler);
+      if (this.currentHandler === handler) this.currentHandler = null;
     };
   }
 

@@ -18,7 +18,7 @@ import { loadConfig, canSend } from '../src/config.js';
 import { getFeishuClient, type FeishuClient } from '../src/feishu.js';
 import { NotificationRouter, ClaimDedup } from '../src/router.js';
 import { SessionRegistry } from '../src/sessions.js';
-import { passesDurationFilter, shouldLog, type LogVerbosity } from '../src/filter.js';
+import { passesDurationFilter, shouldHandle, shouldLog, type LogVerbosity } from '../src/filter.js';
 import { persistDiscovered } from '../src/settings.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
 import type { FeishuMessage, FeishuNotifyConfig } from '../src/types.js';
@@ -46,33 +46,8 @@ function makeLog(cfg: FeishuNotifyConfig): (event: string, data?: Record<string,
   };
 }
 
-/** 是否应该处理这条上行消息（回复通知回注场景）。 */
-function shouldHandle(
-  msg: FeishuMessage,
-  cfg: FeishuNotifyConfig,
-): boolean {
-  // 只看文本消息
-  if (msg.rawContentType !== 'text') return false;
-  // 忽略自己（机器人）发的消息
-  if (msg.senderName && msg.senderName.startsWith('@')) return false;
-  if (msg.senderName === 'pi-feishu-notify') return false;
-
-  // 私聊：白名单（未配置则只允许 p2p 单聊）
-  if (msg.chatType === 'p2p') {
-    if (Array.isArray(cfg.allowedSenderIds) && cfg.allowedSenderIds.length > 0) {
-      if (!cfg.allowedSenderIds.includes(msg.senderId)) return false;
-    }
-    return true;
-  }
-  // 群聊：必须在允许群列表内，且（可选）@ 机器人
-  if (Array.isArray(cfg.allowedChatIds) && cfg.allowedChatIds.length > 0) {
-    if (!cfg.allowedChatIds.includes(msg.chatId)) return false;
-  } else {
-    return false; // 群聊未配置 allowedChatIds 默认忽略
-  }
-  if (cfg.requireMention === true && !msg.mentionedBot) return false;
-  return true;
-}
+/** 是否应该处理这条上行消息（回复通知回注场景）。已抽取为纯函数 src/filter.ts#shouldHandle。 */
+// (逻辑已迁移到 filter.ts，见下方 handleIncoming 调用点)
 
 /** 从回复消息里提取要回注的文本。 */
 function extractReplyText(msg: FeishuMessage): string {
@@ -97,6 +72,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // 每个 session 关联的配置（session_start 时刷新）
   const configs = new Map<string, FeishuNotifyConfig>();
   const sessionCwds = new Map<string, string>();
+  // 当前激活的 session id（单进程内只有一个；用于 stale 回注时回退到当前会话）
+  let currentSid: string | undefined;
   // 本次任务开始时间（agent_start 记录，agent_settled 判断时长用）
   const taskStarts = new Map<string, number>();
   // 用户手动静音的 session（/feishu-notify off）
@@ -166,7 +143,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     // 找到这条消息对应的配置（按 chatId/senderId 归属）
     const cfg = configForMessage(msg) ?? {};
     if (cfg.replyEnabled === false) return;
-    if (!shouldHandle(msg, cfg)) return;
+    // 群聊放行「已知群」：配置的 allowedChatIds ∪ 通知目标 chatId ∪ 自动识别过的群
+    if (!shouldHandle(msg, cfg, discoveredChatIds)) return;
 
     // 必须是"回复了通知"的消息才回注
     const targetSid = router.lookup(msg.replyToMessageId ?? '');
@@ -179,9 +157,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     if (!text) return;
 
     sessionLog(targetSid)('reply-injected', { to: targetSid, from: msg.senderName ?? msg.senderId, text });
-    // 回注到目标 session：优先用该 session 的 pi（同进程内 session 切换不适用，
-    // 这里直接向当前 API 注入——因为单进程内 getSessionId 即目标）
-    injectReply(targetSid, text, msg);
+    await injectReply(targetSid, text, msg);
     router.remove(msg.replyToMessageId ?? '');
   }
 
@@ -194,24 +170,44 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     return undefined;
   }
 
-  /** 回注指令到目标 session。 */
-  function injectReply(sid: string, text: string, msg: FeishuMessage): void {
-    // 目标 session 已结束（configs 中已移除）→ 无法回注，友好提示
+  /**
+   * 回注指令到目标 session。
+   *
+   * 目标 session 不在当前进程（configs 中不存在）时，不再直接放弃：
+   *  - 若目标 session 与当前会话属于同一项目（cwd 相同），回退注入到当前会话
+   *    （用户回复通知的本意就是"继续这个项目"，而单进程内 pi.sendUserMessage
+   *     只能作用于当前激活会话）；
+   *  - 否则（项目也对不上）才发"会话已结束"回执。
+   *
+   * 注入本身 await pi.sendUserMessage：同步抛错（如 print 模式收尾 ctx stale）
+   * 会捕获并回执"转达失败"，不再静默吞掉。
+   */
+  async function injectReply(sid: string, text: string, msg: FeishuMessage): Promise<void> {
+    // 目标 session 不在当前进程 → 判断是否同项目可回退到当前会话
     if (!configs.has(sid)) {
-      sessionLog(sid)('reply-session-gone', { to: sid }, 'WARN');
-      sendReceipt(sid, '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。');
-      return;
+      const entry = registry.get(sid);
+      const curCwd = currentSid ? sessionCwds.get(currentSid) : undefined;
+      const sameProject = Boolean(entry && curCwd && entry.cwd === curCwd);
+      if (!sameProject) {
+        sessionLog(sid)('reply-session-gone', { to: sid, sameProject: false }, 'WARN');
+        sendReceipt(sid, '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。');
+        return;
+      }
+      sessionLog(sid)('reply-stale-session', { to: sid, fallbackTo: currentSid, sameProject: true }, 'WARN');
+      sid = currentSid as string;
     }
+    const prompt =
+      `[feishu-notify] 飞书用户${msg.senderName ? `「${msg.senderName}」` : ''}回复了通知，` +
+      `请求：${text}`;
     try {
-      const prompt =
-        `[feishu-notify] 飞书用户${msg.senderName ? `「${msg.senderName}」` : ''}回复了通知，` +
-        `请求：${text}`;
-      pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
+      await pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
       sendReceipt(sid, `已收到你的回复：「${text}」，正在处理…`);
     } catch (err) {
       // print 模式（-p）收尾时 session 可能已关闭导致 ctx stale，
-      // 此时回注失败不影响通知/路由，仅记日志即可。
-      sessionLog(sid)('inject-failed', { error: err instanceof Error ? err.message : String(err) }, 'WARN');
+      // 此时回注失败不影响通知/路由，仅记日志 + 回执告知用户即可。
+      const msg_ = err instanceof Error ? err.message : String(err);
+      sessionLog(sid)('inject-failed', { error: msg_ }, 'WARN');
+      sendReceipt(sid, `转达失败：${msg_}`);
     }
   }
 
@@ -273,6 +269,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   pi.on('session_start', (_event, ctx) => {
     const sid = ctx.sessionManager.getSessionId();
     const cfg = loadConfig(ctx.cwd);
+    currentSid = sid;
     configs.set(sid, cfg);
     sessionCwds.set(sid, ctx.cwd);
     logs.set(sid, makeLog(cfg));
@@ -370,6 +367,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     taskStarts.delete(sid);
     muted.delete(sid);
     registry.unregister(sid);
+    if (currentSid === sid) currentSid = undefined;
     sessionLog(sid)('session-shutdown', { sid });
   });
 

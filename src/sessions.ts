@@ -57,6 +57,14 @@ export class SessionRegistry {
     );
   }
 
+  /** 直接读取某个 session 的注册条目（含已退出的历史记录，供 stale 回注判断用）。 */
+  get(sid: string): { pid: number; cwd: string } | undefined {
+    if (!sid) return undefined;
+    const map = readJson<SessionMap>(sessionsFile(), () => ({ ...DEFAULT_SESSIONS }));
+    const e = map[sid];
+    return e ? { pid: e.pid, cwd: e.cwd } : undefined;
+  }
+
   /** 当前存活 session 列表（自动剔除死进程）。 */
   alive(): Array<{ sid: string; pid: number; cwd: string }> {
     const map = readJson<SessionMap>(sessionsFile(), () => ({ ...DEFAULT_SESSIONS }));

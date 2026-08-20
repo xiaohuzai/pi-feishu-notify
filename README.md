@@ -54,7 +54,7 @@ pi install ./path/to/pi-feishu-notify
     "receipt": true,                // 转达后回执一条"已收到"
     "requireMention": false,        // 群聊时是否要求 @ 机器人
     "allowedSenderIds": [],         // 私聊白名单（open_id 列表），不填则只处理 p2p 单聊
-    "allowedChatIds": [],           // 群聊白名单（chat_id 列表）
+    "allowedChatIds": [],           // 群聊白名单（chat_id 列表）；不填时仍会放行"通知目标 chatId"与"自动识别过的群"里的回复
     "includeSummary": true,
     "minDurationMs": 0,             // 任务最短时长（毫秒），>= 该值才发通知；0/缺省=不限制
     "logLevel": "normal"             // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
@@ -99,6 +99,8 @@ pi install ./path/to/pi-feishu-notify
    ```
 
 2. **回复指挥**：在飞书里直接**回复**这条通知，输入你要的指令（无需 @ 机器人）。消息会注入到对应的 pi 会话继续执行，执行完成后会再收到新的通知。
+   - **群聊回复**：只要该群是「通知目标 `chatId`」或「`allowedChatIds` 白名单」或「自动识别过的群」，回复都会被接收（`requireMention: false` 时无需 @ 机器人）。
+   - **重启后仍可回注**：pi 重启会生成新的 session id，但回复会自动回退到同一项目（cwd 相同）的当前会话继续执行——不再因为旧会话 id 对不上而只回一句"会话已结束"。
 
 3. **手动通知**：在 pi 里执行 `/feishu-notify <消息>` 可手动发送一条通知到飞书；`/feishu-notify` 无参数时查看扩展状态（含是否静音、最短时长阈值、是否已自动识别 userId）。
 
