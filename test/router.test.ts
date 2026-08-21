@@ -1,11 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NotificationRouter, ClaimDedup } from '../src/router.js';
-
-// 状态文件写入真实的 ~/.pi/agent（测试环境可写入）
-// 为避免污染真实状态，测试前清理 router/dedup 文件
+import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
 import { rmSync } from 'node:fs';
 import { join } from 'node:path';
+
+// 每个测试文件用独立的 state 目录，避免并行时与其他测试文件共用 ~/.pi/agent 造成竞争
+isolateStateDir('router');
 
 function cleanup() {
   try {

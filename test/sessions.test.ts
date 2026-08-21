@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { SessionRegistry } from '../src/sessions.js';
+import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
+
+// 每个测试文件用独立的 state 目录，避免并行时与其他测试文件共用 ~/.pi/agent 造成竞争
+isolateStateDir('sessions');
 
 function cleanup() {
   for (const f of ['feishu-notify-sessions.json']) {

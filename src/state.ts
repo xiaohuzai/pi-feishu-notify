@@ -17,9 +17,9 @@ import {
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
-/** pi 状态根目录。 */
+/** pi 状态根目录。默认 ~/.pi/agent，可用 PI_FEISHU_NOTIFY_STATE_DIR 覆盖（测试隔离 / 自定义路径）。 */
 export function stateDir(): string {
-  return join(homedir(), '.pi', 'agent');
+  return process.env.PI_FEISHU_NOTIFY_STATE_DIR ?? join(homedir(), '.pi', 'agent');
 }
 
 /** 目录锁：mkdir 原子创建实现跨进程互斥。 */

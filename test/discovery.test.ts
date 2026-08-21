@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
 import { rmSync } from 'node:fs';
+import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
+
+// 每个测试文件用独立的 state 目录，避免并行时与其他测试文件（如 integration）共用 ~/.pi/agent 造成竞争
+isolateStateDir('discovery');
 
 function cleanup() {
   try {

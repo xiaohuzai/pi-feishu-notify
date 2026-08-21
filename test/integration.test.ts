@@ -1,21 +1,13 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { rmSync } from 'node:fs';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { isolateStateDir } from './isolate-state.js';
+import { stateDir } from '../src/state.js';
 import { recordDiscovered } from '../src/discovery.js';
 
-// 隔离测试用 home：把 ~/.pi/agent 指向临时目录
-const TMP_HOME = '/tmp/pi-fn-it';
-const AGENT_DIR = join(TMP_HOME, '.pi', 'agent');
-
-vi.stubGlobal('__PI_TEST_HOME', TMP_HOME);
-
-// 需要把 stateDir 指向测试目录——通过改环境变量不生效，
-// 这里直接依赖 ~/.pi/agent（真实 homedir）。测试用真实家目录但清理干净。
-// 为避免污染，测试全程只使用独立的 message_id。
-
-import { stateDir } from '../src/state.js';
+// 每个测试文件用独立的 state 目录，避免并行时与其他测试文件共用 ~/.pi/agent 造成竞争
+isolateStateDir('integration');
 
 function cleanupState() {
   for (const f of ['feishu-notify-router.json', 'feishu-notify-dedup.json', 'feishu-notify-sessions.json', 'feishu-notify-discovered.json']) {
