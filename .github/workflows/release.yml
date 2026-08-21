@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 jobs:
   publish:
@@ -60,13 +61,26 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: 提交版本号变更并打 tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           # 先提交版本号变更，再打 tag，保证 tag 指向真正发布的提交
           git add package.json package-lock.json
-          git commit -m "chore: release v${{ steps.check.outputs.version }} [skip ci]" || echo "无需提交"
+          if git diff --cached --quiet; then
+            echo "无版本号变更，跳过提交与 PR"
+            git tag v${{ steps.check.outputs.version }}
+            git push origin v${{ steps.check.outputs.version }}
+            exit 0
+          fi
+          git commit -m "chore: release v${{ steps.check.outputs.version }} [skip ci]"
           git tag v${{ steps.check.outputs.version }}
-          git push origin main || echo "无变更可推"
           git push origin v${{ steps.check.outputs.version }}
-
+          # main 有 pull_request 规则，不能直推，改走 PR
+          RELEASE_BRANCH="release/v${{ steps.check.outputs.version }}"
+          git branch -f "$RELEASE_BRANCH"
+          git push origin "$RELEASE_BRANCH"
+          gh pr create --base main --head "$RELEASE_BRANCH" \
+            --title "chore: release v${{ steps.check.outputs.version }}" \
+            --body "由 Release 工作流自动创建：更新 package.json / package-lock.json 版本号。请 review 后合并。" || echo "PR 创建失败或已存在，请手动检查"
