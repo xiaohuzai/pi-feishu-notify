@@ -37,8 +37,10 @@ jobs:
           VERSION_INPUT: ${{ github.event.inputs.version }}
         run: |
           # 输入了版本号则 bump，否则用当前 package.json 版本
+          # --allow-same-version：输入版本 == 当前版本时 npm version 会报 "Version not changed" 并退出 1，
+          # 加此选项让流程继续（适用 main 已把版本号写好、只需发布 + 打 tag 的场景）
           if [ -n "$VERSION_INPUT" ]; then
-            npm version "$VERSION_INPUT" --no-git-tag-version
+            npm version "$VERSION_INPUT" --no-git-tag-version --allow-same-version
           fi
           # 注意：不要在 $( ) 内用 \" 转义双引号，bash 会把它当字面量导致语法错误
           VERSION=$(node -p "require('./package.json').version")
