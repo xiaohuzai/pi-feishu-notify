@@ -35,10 +35,14 @@ pi install ./path/to/pi-feishu-notify
 2. 在应用配置里：
    - **机器人**：启用机器人能力
    - **事件订阅**：添加 `接收消息 im.message.receive_v1` 事件
-   - **权限**：`im:message`、`im:message:send_as_bot`（发送消息）
+   - **权限**：
+     - `im:message`、`im:message:send_as_bot`（发送消息）—— markdown 通知必需
+     - `cardkit:card:write`（更新卡片消息）—— **流式回复必需**（见下方说明）
    - **长连接**：事件订阅方式选择 **使用长连接接收事件**（SDK WebSocket 方式，无需公网 URL）
 
 3. 拿到应用的 `App ID` 和 `App Secret`，并把机器人加为联系人（私聊）或拉进群聊（群通知）。
+
+> **注意权限变更生效时机**：修改权限后，需到 **版本管理** 发布一个新版本，权限才会真正生效（很多人改完配置后不生效，是因为漏了这步）。
 
 > 通知目标 `userId`（open_id）和 `chatId`（群 chat_id）**无需手动获取**：配置好并启动后，给机器人发一条消息即可自动识别（见下文「userId / chatId 怎么获取」）。
 
@@ -165,6 +169,8 @@ pi install ./path/to/pi-feishu-notify
 `streamReplies: false` 可关闭流式，回退为「任务完成后发一条 markdown 通知」。
 
 > 仅 **follow-up**（你从飞书回复指挥）场景流式；初始任务（本地发起）仍是任务完成后发一条通知，避免刷屏。
+
+> **流式需要「卡片」能力**：流式回复底层走飞书 **卡片流式更新**（CardKit），应用必须开通 `cardkit:card:write` 权限（markdown 普通通知不需要，它是富文本 post 消息）。若应用**未开通**该权限，流式启动会失败，扩展会**自动回退为普通 markdown 通知**（日志打 `stream-start-failed`），不会中断功能。
 
 ### 回复兼容
 
