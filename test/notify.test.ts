@@ -37,42 +37,65 @@ describe('extractAssistantText', () => {
 });
 
 describe('buildNotificationMarkdown', () => {
-  it('包含标题/元信息/摘要/回复引导', () => {
-    const md = buildNotificationMarkdown(meta, '任务完成摘要');
+  it('包含标题/元信息/摘要/回复引导（中文 locale）', () => {
+    const md = buildNotificationMarkdown(meta, '任务完成摘要', 'zh');
     expect(md).toContain('## ✅ pi 主对话已完成');
     expect(md).toContain('**项目**：my-app');
     expect(md).toContain('**会话**：session-'); // 前 8 位
     expect(md).toContain('**时间**：2026-08-21 12:00:00');
     expect(md).toContain('---');
     expect(md).toContain('任务完成摘要');
-    expect(md).toContain('> 回复本消息可继续指挥该会话');
+    expect(md).toContain('> 回复本消息可继续指挥该会话。');
+  });
+
+  it('英文 locale 输出英文文案', () => {
+    const md = buildNotificationMarkdown(meta, 'task summary', 'en');
+    expect(md).toContain('## ✅ pi main task completed');
+    expect(md).toContain('**Project**：my-app');
+    expect(md).toContain('**Session**：session-');
+    expect(md).toContain('**Time**：2026-08-21 12:00:00');
+    expect(md).toContain('> Reply to this message to keep guiding this session.');
   });
 
   it('无摘要时省略摘要区', () => {
-    const md = buildNotificationMarkdown(meta);
+    const md = buildNotificationMarkdown(meta, undefined, 'zh');
     expect(md).not.toContain('---');
-    expect(md).toContain('> 回复本消息可继续指挥该会话');
+    expect(md).toContain('> 回复本消息可继续指挥该会话。');
   });
 });
 
 describe('buildNotificationText', () => {
-  it('纯文本版兼容旧格式', () => {
-    const text = buildNotificationText(meta, '摘要');
+  it('纯文本版中文格式', () => {
+    const text = buildNotificationText(meta, '摘要', 'zh');
     expect(text).toContain('✅ pi 主对话已完成');
     expect(text).toContain('项目: my-app');
     expect(text).toContain('回复本消息可继续指挥该会话。');
   });
+
+  it('纯文本版英文格式', () => {
+    const text = buildNotificationText(meta, 'summary', 'en');
+    expect(text).toContain('✅ pi main task completed');
+    expect(text).toContain('Project: my-app');
+    expect(text).toContain('Reply to this message to keep guiding this session.');
+  });
 });
 
 describe('buildNotification', () => {
-  it('默认 markdown 格式', () => {
-    const r = buildNotification({} as FeishuNotifyConfig, meta, '摘要');
+  it('默认 markdown 格式（中文 locale）', () => {
+    const r = buildNotification({ locale: 'zh' } as FeishuNotifyConfig, meta, '摘要');
     expect(r.format).toBe('markdown');
     expect(r.content).toContain('## ✅');
+    expect(r.content).toContain('**项目**：my-app');
   });
 
-  it('messageFormat=text 回退纯文本', () => {
-    const r = buildNotification({ messageFormat: 'text' } as FeishuNotifyConfig, meta, '摘要');
+  it('英文 locale 默认 markdown', () => {
+    const r = buildNotification({ locale: 'en' } as FeishuNotifyConfig, meta, 'summary');
+    expect(r.format).toBe('markdown');
+    expect(r.content).toContain('## ✅ pi main task completed');
+  });
+
+  it('messageFormat=text 回退纯文本（中文 locale）', () => {
+    const r = buildNotification({ messageFormat: 'text', locale: 'zh' } as FeishuNotifyConfig, meta, '摘要');
     expect(r.format).toBe('text');
     expect(r.content).toContain('项目: my-app');
   });

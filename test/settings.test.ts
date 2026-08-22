@@ -26,8 +26,8 @@ describe('persistDiscovered', () => {
     expect(readSettings(TMP)['feishu-notify']).toEqual({ userId: 'ou_abc' });
   });
 
-  it('已配置 userId → 不覆盖', () => {
-    const r = persistDiscovered(TMP, { userId: 'ou_existing' }, 'ou_new', []);
+  it('已配置 userId → 不覆盖（中文 locale 错误消息）', () => {
+    const r = persistDiscovered(TMP, { userId: 'ou_existing', locale: 'zh' }, 'ou_new', []);
     expect(r.ok).toBe(false);
     expect(r.error).toContain('未发现');
     const p = join(TMP, '.pi', 'settings.json');
@@ -41,8 +41,8 @@ describe('persistDiscovered', () => {
     expect(readSettings(TMP)['feishu-notify']).toEqual({ chatId: 'oc_chat1' });
   });
 
-  it('识别到多个群 → 不写 chatId（避免歧义）', () => {
-    const r = persistDiscovered(TMP, {}, undefined, ['oc_a', 'oc_b']);
+  it('识别到多个群 → 不写 chatId（避免歧义，中文 locale 错误消息）', () => {
+    const r = persistDiscovered(TMP, { locale: 'zh' }, undefined, ['oc_a', 'oc_b']);
     expect(r.ok).toBe(false);
     expect(r.error).toContain('多个群聊');
   });

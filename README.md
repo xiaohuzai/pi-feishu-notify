@@ -1,54 +1,56 @@
 # pi-feishu-notify
 
-**pi 主对话 ⇄ 飞书双向桥**：pi 任务完成时推送飞书通知，在飞书里**回复通知**即可远程指挥对应 pi 会话继续执行。
+> **Languages**: **English** · [简体中文](README.zh-CN.md)
 
-**不依赖 `lark-cli`** —— 基于官方 `@larksuiteoapi/node-sdk` 的 WebSocket 长连接直连飞书，无需安装任何额外 CLI 工具，也无需公网回调。
+**Bidirectional bridge between pi main conversations and Feishu (Lark)**: when a pi task finishes, a notification is pushed to Feishu — and you can **reply to the notification in Feishu** to remotely command that pi session to continue.
 
-## 特性
+**No `lark-cli` dependency** — it connects directly to Feishu over the official `@larksuiteoapi/node-sdk` WebSocket long connection. No extra CLI tools, no public callback URL needed.
 
-- ✅ **不依赖 lark-cli**：官方 SDK 直连，零额外工具链
-- ✅ **session 级通知**：任务结束（`agent_settled`）自动推送飞书通知
-- ✅ **回复回注**：在飞书里回复通知，指令自动注入对应 pi 会话继续执行
-- ✅ **双向桥**：pi → 飞书（通知）/ 飞书 → pi（指令）
-- ✅ **markdown 美化**：通知默认以飞书富文本（post）渲染，标题/加粗/代码块/引用清晰美观
-- ✅ **流式回复**：在飞书回复通知指挥 pi 后，pi 的回复以「打字机」效果实时流式推回飞书（原生卡片流式）
-- ✅ **跨进程去重**：多 pi 进程场景下同一消息只处理一次
-- ✅ **崩溃自愈**：自动清理死进程残留状态
-- ✅ **配置灵活**：全局 + 项目级覆盖，支持环境变量插值，自动识别 userId/chatId
+## Features
 
-## 安装
+- ✅ **No lark-cli**: official SDK direct connection, zero extra toolchain
+- ✅ **Session-scoped notifications**: auto-sends a Feishu notification when a task finishes (`agent_settled`)
+- ✅ **Reply-and-inject**: reply to the notification in Feishu; your instruction is injected into the corresponding pi session to keep it going
+- ✅ **Bidirectional bridge**: pi → Feishu (notifications) / Feishu → pi (instructions)
+- ✅ **Markdown formatting**: notifications render as Feishu rich text (`post`) with clean titles, bold, code blocks, and quotes
+- ✅ **Streaming replies**: after you reply in Feishu to command pi, pi's response streams back to Feishu in real time with a typewriter effect (native card streaming)
+- ✅ **Cross-process dedup**: the same message is processed only once across multiple pi processes
+- ✅ **Crash self-healing**: automatically cleans up residual state from dead processes
+- ✅ **Flexible config**: global + project-level overrides, environment variable interpolation, auto-detect `userId`/`chatId`
+- ✅ **i18n**: English-first by default; Chinese is automatic in `zh_*` environments, or force it via `locale`
+
+## Install
 
 ```bash
-# 通过 npm 安装（发布到 pi.dev/packages 社区目录）
+# via npm (published in the pi.dev/packages community directory)
 pi install npm:pi-feishu-notify
 
-# 或通过 git 安装
+# or via git
 pi install git:github.com/xiaohuzai/pi-feishu-notify
 
-# 或本地路径
+# or a local path
 pi install ./path/to/pi-feishu-notify
 ```
 
-## 前置条件
+## Prerequisites
 
-1. 一个**飞书企业自建应用**（[飞书开放平台](https://open.feishu.cn/) → 开发者后台 → 创建企业自建应用）
-2. 在应用配置里：
-   - **机器人**：启用机器人能力
-   - **事件订阅**：添加 `接收消息 im.message.receive_v1` 事件
-   - **权限**：
-     - `im:message`、`im:message:send_as_bot`（发送消息）—— markdown 通知必需
-     - `cardkit:card:write`（更新卡片消息）—— **流式回复必需**（见下方说明）
-   - **长连接**：事件订阅方式选择 **使用长连接接收事件**（SDK WebSocket 方式，无需公网 URL）
+1. A **Feishu enterprise self-built app** ([Feishu Open Platform](https://open.feishu.cn/) → Developer Console → Create Enterprise Self-built App)
+2. In the app configuration:
+   - **Bot**: enable the bot capability
+   - **Event subscription**: add the `Receive message im.message.receive_v1` event
+   - **Permissions**:
+     - `im:message`, `im:message:send_as_bot` (send messages) — required for markdown notifications
+     - `cardkit:card:write` (update card messages) — **required for streaming replies** (see below)
+   - **Long connection**: set the event subscription mode to **Receive events via long connection** (SDK WebSocket mode — no public URL required)
+3. Get the app's **App ID** and **App Secret**, and add the bot as a contact (DM) or pull it into a group (group notifications).
 
-3. 拿到应用的 `App ID` 和 `App Secret`，并把机器人加为联系人（私聊）或拉进群聊（群通知）。
+> **Note on permission changes**: after modifying permissions, you must **publish a new version** under *Version Management* for them to take effect. (Many people change settings and see no effect simply because they skipped this step.)
 
-> **注意权限变更生效时机**：修改权限后，需到 **版本管理** 发布一个新版本，权限才会真正生效（很多人改完配置后不生效，是因为漏了这步）。
+> The notification target `userId` (open_id) and `chatId` (group chat_id) **don't need to be fetched manually**: after configuring and starting, just send the bot a message and it will auto-detect them (see "How to get userId / chatId" below).
 
-> 通知目标 `userId`（open_id）和 `chatId`（群 chat_id）**无需手动获取**：配置好并启动后，给机器人发一条消息即可自动识别（见下文「userId / chatId 怎么获取」）。
+## Configuration
 
-## 配置
-
-在 `~/.pi/agent/settings.json`（全局）或项目 `.pi/settings.json`（项目覆盖）中添加：
+Add to `~/.pi/agent/settings.json` (global) or project `.pi/settings.json` (project override):
 
 ```json
 {
@@ -56,153 +58,166 @@ pi install ./path/to/pi-feishu-notify
     "enabled": true,
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
-    "replyEnabled": true,           // 是否允许回复回注
-    "receipt": true,                // 转达后回执一条"已收到"
-    "requireMention": false,        // 群聊时是否要求 @ 机器人
-    "allowedSenderIds": [],         // 私聊白名单（open_id 列表），不填则只处理 p2p 单聊
-    "allowedChatIds": [],           // 群聊白名单（chat_id 列表）；不填时仍会放行"通知目标 chatId"与"自动识别过的群"里的回复
+    "replyEnabled": true,           // whether to allow reply-and-inject
+    "receipt": true,                // send a "received" receipt after relaying
+    "requireMention": false,        // in groups, whether @bot is required
+    "allowedSenderIds": [],         // DM whitelist (open_id list); empty = only handle p2p DMs
+    "allowedChatIds": [],           // group whitelist (chat_id list); empty = still allow the "notification target chatId" and "auto-detected groups"
     "includeSummary": true,
-    "minDurationMs": 0,             // 任务最短时长（毫秒），>= 该值才发通知；0/缺省=不限制
-    "logLevel": "normal",           // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
-    "messageFormat": "markdown",    // 通知/回复格式：'markdown'（默认，飞书富文本）| 'text'（纯文本）
-    "streamReplies": true           // 流式回复：在飞书回复通知指挥 pi 后，pi 的回复以打字机效果流式推回（默认开）
+    "minDurationMs": 0,             // min task duration (ms); only notify when >= this value; 0/absent = no limit
+    "logLevel": "normal",           // 'quiet'|'normal'|'verbose': log verbosity; normal no longer spams notification-sent
+    "messageFormat": "markdown",    // notification/reply format: 'markdown' (default, Feishu rich text) | 'text' (plain)
+    "streamReplies": true,          // streaming replies: pi's reply streams back to Feishu with a typewriter effect (default on)
+    "locale": "auto"                // 'auto' (default, detect via LANG) | 'en' (English) | 'zh' (中文)
   }
 }
 ```
 
-> **`userId` / `chatId` 不是必填**：不配置时，扩展会自动识别通知目标——给机器人发一条私聊消息即识别出 `userId`，群里发消息即识别出 `chatId`，并自动用于发送（可用 `/feishu-notify bind` 把识别结果固定写入配置）。只有想锁定发送目标时才手动配置。
+> **`userId` / `chatId` are not required**: when unset, the extension auto-detects the send target — send the bot a DM to detect your `userId`, or send a message in a group to detect that group's `chatId`, and it's used automatically (use `/feishu-notify bind` to pin the detected values into config). Only configure them manually if you want to lock the send target.
 
-> **安全建议**：`appSecret` 使用 `${ENV_VAR}` 占位符，通过环境变量注入，避免明文写入配置文件。支持 `${NAME}` 和 `${NAME:-fallback}` 语法。
+> **Security tip**: use `${ENV_VAR}` placeholders for `appSecret`, injected via environment variables to avoid plaintext in config files. Supports `${NAME}` and `${NAME:-fallback}` syntax.
 
-### userId / chatId 怎么获取？可以自动识别
+### How to get userId / chatId? Auto-detection
 
-`userId`（open_id）和 `chatId`（群 chat_id）不需要手动查。**只要你在飞书里给机器人发一条消息**，扩展就会自动记住：
+`userId` (open_id) and `chatId` (group chat_id) don't need to be looked up manually. **Just send the bot a message in Feishu** and the extension remembers it automatically:
 
-- **私聊**：你给机器人发一条消息 → 自动识别出你的 `userId`（open_id）
-- **群聊**：把机器人拉进群，在群里 @ 机器人发一条消息 → 自动识别出该群的 `chatId`
+- **DM**: send the bot a message → your `userId` (open_id) is auto-detected
+- **Group**: pull the bot into a group, @bot and send a message → that group's `chatId` is auto-detected
 
-识别到后：
+Once detected:
 
-- **自动回退生效**：如果 settings 里没配 `userId`，通知会自动发到刚识别出来的私聊用户（首次会自动提示可用 `/feishu-notify bind` 持久化）。
-- **`/feishu-notify whoami`**：查看当前已识别的 `userId` / `chatId`（一般不需要，排查或想手动锁定目标时用）。
-- **`/feishu-notify bind`**：把识别到的值自动写入项目 `.pi/settings.json`（只补写缺失字段，不覆盖已有配置），重启或 `/reload` 后固定生效。
-- **重启也能记住**：识别结果会存到 `~/.pi/agent/feishu-notify-discovered.json`。下次启动时若 settings 仍未配置 `userId` 但已识别过，pi 里会弹一条一次性提示，提醒你用 `/feishu-notify bind` 一键写入。
+- **Automatic fallback**: if `userId` isn't set in settings, notifications go to the just-detected DM user automatically (first time it hints you can persist with `/feishu-notify bind`).
+- **`/feishu-notify whoami`**: view the currently detected `userId` / `chatId` (usually unneeded; use it for troubleshooting or to lock targets manually).
+- **`/feishu-notify bind`**: write the detected values into project `.pi/settings.json` (only fills missing fields, never overwrites existing config); takes effect after restart or `/reload`.
+- **Survives restarts**: detection results are stored in `~/.pi/agent/feishu-notify-discovered.json`. On next startup, if `userId` isn't configured but was detected before, pi shows a one-time hint to use `/feishu-notify bind`.
 
-> 提示：私聊自动回退是最顺滑的入门方式——配好 `appId/appSecret`、机器人加好友后发条消息，再把 task 交给 pi，通知就会发回来。
+> Tip: DM auto-fallback is the smoothest onboarding — configure `appId/appSecret`, add the bot as a friend, send a message, hand a task to pi, and the notification comes back.
 
-## 使用
+## Usage
 
-配置完成后启动 pi（或 `/reload`），扩展自动生效：
+Start pi after configuring (or `/reload`) — the extension activates automatically:
 
-1. **收到通知**：pi 每次任务结束（`agent_settled`）自动向飞书发送一条通知，包含**项目名、会话 ID、时间**与最近一次回复摘要，方便多任务区分：
+1. **Receive a notification**: when a pi task finishes (`agent_settled`), a notification is sent to Feishu automatically, containing **project name, session ID, time** and the latest reply summary, so you can tell multi-tasks apart:
    ```
-   ✅ pi 主对话已完成
-   项目: my-project
-   会话: 01a00b5b
-   时间: 2026/8/17 00:17:00
+   ✅ pi main task completed
+   Project: my-project
+   Session: 01a00b5b
+   Time: 2026/8/17 00:17:00
 
-   <任务结果摘要>
+   <task result summary>
 
-   回复本消息可继续指挥该会话。
+   Reply to this message to keep guiding this session.
    ```
 
-2. **回复指挥**：在飞书里直接**回复**这条通知，输入你要的指令（无需 @ 机器人）。消息会注入到对应的 pi 会话继续执行，执行完成后会再收到新的通知。
-   - **群聊回复**：只要该群是「通知目标 `chatId`」或「`allowedChatIds` 白名单」或「自动识别过的群」，回复都会被接收（`requireMention: false` 时无需 @ 机器人）。
-   - **重启后仍可回注**：pi 重启会生成新的 session id，但回复会自动回退到同一项目（cwd 相同）的当前会话继续执行——不再因为旧会话 id 对不上而只回一句"会话已结束"。
+2. **Reply to command**: in Feishu, just **reply** to the notification with your instruction (no need to @ the bot). The message is injected into the corresponding pi session to continue, and you'll receive a new notification when it finishes.
+   - **Group replies**: replies are accepted as long as the group is the "notification target `chatId`", the "`allowedChatIds` whitelist", or an "auto-detected group" (with `requireMention: false`, no @bot needed).
+   - **Injection survives restarts**: pi generates a new session id after restart, but the reply automatically falls back to the current session in the same project (same cwd) to continue — no more "session ended" dead-ends due to an old session id mismatch.
 
-3. **手动通知**：在 pi 里执行 `/feishu-notify <消息>` 可手动发送一条通知到飞书；`/feishu-notify` 无参数时查看扩展状态（含是否静音、最短时长阈值、是否已自动识别 userId）。
+3. **Manual notification**: run `/feishu-notify <message>` in pi to send a notification to Feishu manually; `/feishu-notify` with no args shows extension status (muted state, min duration threshold, auto-detected userId).
 
-### 减少日志打扰 / 控制通知频率
+### Reduce log noise / control notification frequency
 
-- **日志安静**：默认 `logLevel: 'normal'` 只输出警告和错误，日常任务完成的 `[feishu-notify] notification-sent {...}` 不再刷屏。想更安静设 `'quiet'`（只报错），需要排查设 `'verbose'`（含发送细节）。
-- **长任务才通知**：设置 `minDurationMs`（毫秒），任务从 `agent_start` 到 `agent_settled` 不足该时长则不发送。例如 `minDurationMs: 60000` 表示 1 分钟以内的短任务不打扰。
-- **按会话静音**：在 pi 里执行 `/feishu-notify off`（或 `mute`）静音当前会话，任务完成后不再自动发通知；`/feishu-notify on`（或 `unmute`）恢复。适合某些只想本地、不想推飞书的工作场景。
+- **Quiet logs**: default `logLevel: 'normal'` only outputs warnings and errors — daily `[feishu-notify] notification-sent {...}` no longer spams. Set `'quiet'` (errors only) to be quieter, or `'verbose'` (includes send details) for troubleshooting.
+- **Only notify long tasks**: set `minDurationMs` (ms); tasks shorter than this between `agent_start` and `agent_settled` don't notify. E.g. `minDurationMs: 60000` = short tasks under 1 minute stay silent.
+- **Per-session mute**: run `/feishu-notify off` (or `mute`) to mute the current session — no more automatic notifications after tasks finish; `/feishu-notify on` (or `unmute`) to restore. Good for workflows you want to keep local.
 
-## 工作原理
+## How it works
 
 ```
 ┌────────────┐   agent_settled    ┌──────────────┐  SDK WebSocket  ┌────────┐
-│  pi session │ ─────────────────▶ │  Notification │ 长连接（直连）    │  飞书   │
-│  (主对话)    │ ◀───────────────── │     Router    │                │  App   │
-└────────────┘   sendUserMessage   └──────────────┘  ◀── 回复通知 ──  └────────┘
+│  pi session │ ─────────────────▶ │  Notification │  long conn      │ Feishu │
+│  (main)     │ ◀───────────────── │     Router    │                 │  App   │
+└────────────┘   sendUserMessage   └──────────────┘  ◀── reply ─────  └────────┘
       ▲                │               │
-      │                │               └── 按 replyToMessageId 反查目标 session
-      └────────────────┴── 指令回注
+      │                │               └── lookup target session by replyToMessageId
+      └────────────────┴── command injection
 ```
 
-- **下行**：`agent_settled` → 发送 markdown 富文本通知（或 follow-up 场景的流式卡片），拿到 `message_id`，记录到 `~/.pi/agent/feishu-notify-router.json`（`message_id → session` 映射）
-- **上行**：SDK 长连接收到消息 → 若 `replyToMessageId` 命中路由表 → 跨进程去重认领 → `pi.sendUserMessage` 回注指令
-- **常驻单例**：WebSocket consumer 是进程级单例，跨 session 共享，不随 session 切换断开
-- **去重**：`~/.pi/agent/feishu-notify-dedup.json` 记录已处理消息，跨进程互斥
+- **Downstream**: `agent_settled` → sends a markdown rich-text notification (or a streaming card for follow-ups), gets the `message_id`, records `message_id → session` mapping in `~/.pi/agent/feishu-notify-router.json`
+- **Upstream**: the SDK long connection receives a message → if `replyToMessageId` hits the routing table → cross-process dedup claim → `pi.sendUserMessage` injects the command
+- **Resident singleton**: the WebSocket consumer is a process-level singleton shared across sessions, and doesn't drop when sessions switch
+- **Dedup**: `~/.pi/agent/feishu-notify-dedup.json` records processed messages with cross-process mutual exclusion
 
-## markdown 美化 & 流式回复
+## Markdown formatting & streaming replies
 
-### 通知 markdown 美化（默认）
+### Notification markdown formatting (default)
 
-任务完成通知默认以飞书富文本（`post` 消息 + `md` 元素）发送，由飞书原生渲染标题、加粗、列表、代码块、引用：
+Task-completion notifications are sent as Feishu rich text (`post` message + `md` element) by default, with title, bold, lists, code blocks, and quotes rendered natively by Feishu:
 
 ```markdown
-## ✅ pi 主对话已完成
+## ✅ pi main task completed
 
-**项目**：my-app
-**会话**：a1b2c3d4
-**时间**：2026-08-21 12:00:00
+**Project**: my-app
+**Session**: a1b2c3d4
+**Time**: 2026-08-21 12:00:00
 
 ---
 
-（任务摘要，代码块/列表原样保留）
+(task summary, code blocks/lists preserved as-is)
 
-> 回复本消息可继续指挥该会话
+> Reply to this message to keep guiding this session.
 ```
 
-设为 `messageFormat: "text"` 可回退为纯文本。
+Set `messageFormat: "text"` to fall back to plain text.
 
-### 流式回复（follow-up 打字机效果）
+### Streaming replies (follow-up typewriter effect)
 
-当你在飞书**回复通知**指挥 pi 继续时，pi 的回复会以「打字机」效果实时流式推回飞书：
+When you **reply to a notification** in Feishu to command pi to continue, pi's reply streams back to Feishu in real time with a typewriter effect:
 
-1. 你回复通知 → 收到「已收到你的回复，正在处理…」回执
-2. pi 开始处理 → 飞书里出现一张流式卡片，内容随 token 逐字输出（原生卡片流式动画）
-3. 处理完成 → 流式卡片收尾（关闭打字光标），**不再额外发一条「已完成」通知**（合并）
-4. 你仍可继续回复这条流式消息再次指挥
+1. You reply to the notification → you get a "received, processing…" receipt
+2. pi starts processing → a streaming card appears in Feishu, content typed out token by token (native card streaming animation)
+3. Done → the streaming card wraps up (closes the typewriter cursor); **no extra "completed" notification** (merged)
+4. You can keep replying to this streaming message to command again
 
-`streamReplies: false` 可关闭流式，回退为「任务完成后发一条 markdown 通知」。
+`streamReplies: false` disables streaming and falls back to "send one markdown notification after the task finishes".
 
-> 仅 **follow-up**（你从飞书回复指挥）场景流式；初始任务（本地发起）仍是任务完成后发一条通知，避免刷屏。
+> Streaming applies only to **follow-ups** (you reply from Feishu to command). Initial tasks (started locally) still send one notification after finishing, to avoid spam.
 
-> **流式需要「卡片」能力**：流式回复底层走飞书 **卡片流式更新**（CardKit），应用必须开通 `cardkit:card:write` 权限（markdown 普通通知不需要，它是富文本 post 消息）。若应用**未开通**该权限，流式启动会失败，扩展会**自动回退为普通 markdown 通知**（日志打 `stream-start-failed`），不会中断功能。
+> **Streaming requires "card" capability**: streaming replies use Feishu **card streaming updates** (CardKit) under the hood — the app must enable the `cardkit:card:write` permission (not needed for plain markdown notifications, which are rich-text post messages). If the app **doesn't** have it, streaming startup fails and the extension **automatically falls back to a normal markdown notification** (logs `stream-start-failed`), without breaking functionality.
 
-### 回复兼容
+### Reply compatibility
 
-SDK 会把收到的富文本（post）消息转成纯文本，因此无论你回复的是 markdown 通知、流式卡片还是普通文本消息，回注指令都能正确提取。
+The SDK converts received rich-text (`post`) messages to plain text, so no matter whether you reply to a markdown notification, a streaming card, or a plain text message, the injected command is extracted correctly.
 
-## 文件结构
+## Language (i18n)
+
+User-visible text — Feishu notifications, receipts, `/feishu-notify` command output, and error messages — follows the `locale` setting:
+
+- **`auto` (default)**: detects the environment via `LANG` / `LC_ALL` / `LC_MESSAGES`; `zh_*` environments get Chinese, everything else gets English.
+- **`en`**: force English (the default main language for global developers).
+- **`zh`**: force Chinese (简体中文).
+
+Docs (this README) and the gallery description are English-first, with a [简体中文版](README.zh-CN.md) available. Log events and developer scripts use English.
+
+## File structure
 
 ```
 pi-feishu-notify/
 ├── extensions/
-│   └── feishu-notify.ts     # pi 扩展入口（事件钩子 + 命令）
+│   └── feishu-notify.ts     # pi extension entry (event hooks + commands)
 ├── src/
-│   ├── types.ts             # 类型定义
-│   ├── config.ts            # 配置加载（全局+项目+env 插值+旧配置迁移）
-│   ├── feishu.ts            # 飞书 SDK 客户端（发送 + 长连接，进程级单例）
-│   ├── router.ts            # 通知路由 + 跨进程去重
-│   ├── sessions.ts          # 会话注册表（崩溃自愈）
-│   ├── filter.ts            # 发送/日志过滤（minDurationMs、logLevel）
-│   ├── notify.ts            # 通知内容构建（markdown 美化 + 回复文本提取）
-│   ├── settings.ts          # 自动识别 ID 持久化（/feishu-notify bind）
-│   ├── discovery.ts         # 识别结果跨进程持久化（重启提示用）
-│   └── state.ts             # 状态文件原子读写 + 目录锁
-└── test/                    # 单元测试（vitest）
+│   ├── types.ts             # type definitions
+│   ├── config.ts            # config loading (global + project + env interpolation + legacy migration)
+│   ├── feishu.ts            # Feishu SDK client (send + long connection, process-level singleton)
+│   ├── router.ts            # notification routing + cross-process dedup
+│   ├── sessions.ts          # session registry (crash self-healing)
+│   ├── filter.ts            # send/log filtering (minDurationMs, logLevel)
+│   ├── notify.ts            # notification content building (markdown formatting + reply text extraction)
+│   ├── settings.ts          # auto-detected ID persistence (/feishu-notify bind)
+│   ├── discovery.ts         # cross-process persistence of detection results (restart hint)
+│   ├── i18n.ts              # lightweight internationalization (en/zh messages)
+│   └── state.ts             # state file atomic read/write + directory lock
+├── scripts/                 # developer helper scripts (capture open_id, verify credentials)
+└── test/                    # unit tests (vitest)
 ```
 
-## 卸载
+## Uninstall
 
 ```bash
-# npm 安装方式
+# npm install
 pi remove npm:pi-feishu-notify
 
-# git 安装方式
+# git install
 pi remove git:github.com/xiaohuzai/pi-feishu-notify
 ```
 
