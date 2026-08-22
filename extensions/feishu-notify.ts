@@ -3,9 +3,11 @@
  *
  * pi 主对话 ⇄ 飞书双向桥，**不依赖 lark-cli**（基于官方 SDK 长连接）：
  *
- *  - 下行：agent_settled（任务结束）→ SDK 发送飞书通知，记录 message_id
+ *  - 下行：agent_settled（任务结束）→ SDK 发送飞书 markdown 通知，记录 message_id
  *  - 上行：飞书里回复通知 → SDK 长连接收到消息 → 按 replyToMessageId 反查
  *    目标 session → pi.sendUserMessage 回注指令，继续执行
+ *  - 进度：回注后先发「已收到」回执，长任务期间在该消息上原地刷新「已用时 Xs」
+ *    （im.v1.message.update），避免飞书侧干等；任务结束后发最终 markdown 结果。
  *
  * 进程级单例 FeishuClient（跨 session 共享 WebSocket consumer）。
  */
@@ -15,7 +17,7 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import { loadConfig, canSend } from '../src/config.js';
-import { getFeishuClient, type FeishuClient, type MarkdownStream } from '../src/feishu.js';
+import { getFeishuClient, type FeishuClient } from '../src/feishu.js';
 import { NotificationRouter, ClaimDedup } from '../src/router.js';
 import { SessionRegistry } from '../src/sessions.js';
 import { passesDurationFilter, shouldHandle, shouldLog, type LogVerbosity } from '../src/filter.js';
@@ -47,9 +49,6 @@ function makeLog(cfg: FeishuNotifyConfig): (event: string, data?: Record<string,
     process.stderr.write(line + '\n');
   };
 }
-
-/** 是否应该处理这条上行消息（回复通知回注场景）。已抽取为纯函数 src/filter.ts#shouldHandle。 */
-// (逻辑已迁移到 filter.ts，见下方 handleIncoming 调用点)
 
 export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // 每个 session 关联的配置（session_start 时刷新）
@@ -86,44 +85,40 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // 最近一次 agent 回复文本（agent_end 时更新，agent_settled 时发送）
   let lastAssistantText = '';
 
-  // ── 流式回复状态（on-followup）──
-  // 用户从飞书回复通知回注指令后，把 pi 的回复以打字机效果流式推回飞书。
-  // 每个 follow-up 任务一个 streamingTask：
-  //  - buffer：assistant 文本增量累积（stream 就绪前也能缓存，避免丢字）
-  //  - stream：已就绪的流式句柄（异步建立，建立后先把 buffer 里已累积的 flush 进去）
-  //  - target/replyTo：发送目标 + 要回复的用户消息 id
-  type StreamingTask = {
-    buffer: string[];
-    stream: MarkdownStream | null;
-    target: { userId?: string; chatId?: string };
-    replyTo: string;
-    finished: boolean;
-  };
-  const streamingTasks = new Map<string, StreamingTask>();
+  // ── 进度心跳状态（follow-up 回注后）──
+  // 回注后发一条「已收到」回执，长任务期间用 updateText 在原地刷新已用时，
+  // 避免飞书侧傻等不知道 bot 是否还活着。keyed by sid，agent_settled 时停掉。
+  const progress = new Map<string, {
+    msgId: string;
+    timer: ReturnType<typeof setInterval>;
+    start: number;
+  }>();
 
-  /** 记录一段文本增量到流式任务（未就绪则先入 buffer）。 */
-  function pushStreamChunk(sid: string, chunk: string): void {
-    if (!chunk) return;
-    const task = streamingTasks.get(sid);
-    if (!task || task.finished) return;
-    if (task.stream) {
-      task.stream.append(chunk);
-    } else {
-      task.buffer.push(chunk);
-    }
+  /** 进度刷新间隔（毫秒）。 */
+  const PROGRESS_INTERVAL_MS = 15000;
+
+  /** 启动某 session 的进度心跳：定时在原回执消息上刷新已用时。 */
+  function startProgress(sid: string, msgId: string): void {
+    const start = Date.now();
+    const timer = setInterval(() => {
+      const seconds = Math.max(1, Math.round((Date.now() - start) / 1000));
+      void client?.updateText(msgId, format(messages(sessionLocale(sid)).receipt.progress, { seconds }))
+        .catch(() => undefined);
+    }, PROGRESS_INTERVAL_MS);
+    timer.unref?.();
+    progress.set(sid, { msgId, timer, start });
   }
 
-  /** 把流式任务置为完成：结束句柄并返回其 messageId（用于路由）。 */
-  function finishStreamTask(sid: string): MarkdownStream | null {
-    const task = streamingTasks.get(sid);
-    if (!task || task.finished) return null;
-    task.finished = true;
-    streamingTasks.delete(sid);
-    if (task.stream) {
-      void task.stream.done().catch(() => undefined);
-      return task.stream;
+  /** 停止心跳；done=true 时把回执消息更新为「处理完成，结果见下一条」。 */
+  function stopProgress(sid: string, done = false): void {
+    const p = progress.get(sid);
+    if (!p) return;
+    clearInterval(p.timer);
+    progress.delete(sid);
+    if (done) {
+      void client?.updateText(p.msgId, messages(sessionLocale(sid)).receipt.done)
+        .catch(() => undefined);
     }
-    return null;
   }
 
   /** 获取当前 session 的 sid + 是否允许发送。 */
@@ -207,8 +202,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
    *     只能作用于当前激活会话）；
    *  - 否则（项目也对不上）才发"会话已结束"回执。
    *
-   * 注入本身 await pi.sendUserMessage：同步抛错（如 print 模式收尾 ctx stale）
-   * 会捕获并回执"转达失败"，不再静默吞掉。
+   * 流程：先发「已收到」回执并启动进度心跳（在 sendUserMessage 之前，保证空闲场景
+   * 也能立即给飞书反馈），再阻塞等待 agent 运行；agent_end 记录最终文本、
+   * agent_settled 停掉心跳并发送最终 markdown 结果。
    */
   async function injectReply(sid: string, text: string, msg: FeishuMessage): Promise<void> {
     // 目标 session 不在当前进程 → 判断是否同项目可回退到当前会话
@@ -218,7 +214,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       const sameProject = Boolean(entry && curCwd && entry.cwd === curCwd);
       if (!sameProject) {
         sessionLog(sid)('reply-session-gone', { to: sid, sameProject: false }, 'WARN');
-        sendReceipt(sid, messages(sessionLocale(sid)).receipt.sessionGone);
+        void sendReceipt(sid, messages(sessionLocale(sid)).receipt.sessionGone);
         return;
       }
       sessionLog(sid)('reply-stale-session', { to: sid, fallbackTo: currentSid, sameProject: true }, 'WARN');
@@ -229,45 +225,36 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       `[feishu-notify] ${format(t.inject.prompt, {
         name: msg.senderName ? ` 「${msg.senderName}」` : '',
       })}${text}`;
+    // 先发回执 + 启动进度心跳（必须在 sendUserMessage 之前：空闲时它会阻塞到整轮结束）
+    const msgId = await sendReceipt(sid, `${t.receipt.received}（${text}）`);
+    if (msgId) startProgress(sid, msgId);
     try {
       await pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-      sendReceipt(sid, `${t.receipt.received}（${text}）`);
-      // 标记「本次 follow-up 需要流式回推」：下一个 assistant 消息开始流式
-      const cfg = configs.get(sid);
-      if (cfg && cfg.enabled !== false && cfg.streamReplies !== false) {
-        const target = resolveSendTarget(cfg, sessionLog(sid));
-        if (target.userId || target.chatId) {
-          // 预建任务（含 buffer），首个 assistant 消息到达时启动流式
-          if (!streamingTasks.has(sid)) {
-            streamingTasks.set(sid, {
-              buffer: [],
-              stream: null,
-              target,
-              replyTo: msg.messageId,
-              finished: false,
-            });
-          }
-          sessionLog(sid)('stream-marked', { to: sid, replyTo: msg.messageId }, 'INFO');
-        }
-      }
     } catch (err) {
       // print 模式（-p）收尾时 session 可能已关闭导致 ctx stale，
       // 此时回注失败不影响通知/路由，仅记日志 + 回执告知用户即可。
+      stopProgress(sid);
       const msg_ = err instanceof Error ? err.message : String(err);
       sessionLog(sid)('inject-failed', { error: msg_ }, 'WARN');
-      sendReceipt(sid, `${t.receipt.relayFailed}${msg_}`);
+      void sendReceipt(sid, `${t.receipt.relayFailed}${msg_}`);
     }
   }
 
-  /** 发送回执（可选）。 */
-  function sendReceipt(sid: string, text: string): void {
+  /**
+   * 发送回执（可选），返回已发送消息的 message_id（用于进度心跳原地刷新）。
+   * 返回 undefined 表示未启用回执或发送失败。
+   */
+  async function sendReceipt(sid: string, text: string): Promise<string | undefined> {
     const cfg = configs.get(sid);
-    if (!cfg || cfg.receipt === false) return;
+    if (!cfg || cfg.receipt === false) return undefined;
     const project = basename(sessionCwds.get(sid) ?? '') || '?';
     const target = resolveSendTarget(cfg, sessionLog(sid));
-    void client?.sendText(`${text}\n\n${messages(sessionLocale(sid)).notification.project}: ${project}`, target).then((r) => {
-      if (!r.ok) sessionLog(sid)('receipt-failed', { error: r.error }, 'ERROR');
-    });
+    const r = await client?.sendText(`${text}\n\n${messages(sessionLocale(sid)).notification.project}: ${project}`, target);
+    if (!r?.ok) {
+      if (r) sessionLog(sid)('receipt-failed', { error: r.error }, 'ERROR');
+      return undefined;
+    }
+    return r.messageId;
   }
 
   /**
@@ -355,63 +342,6 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     lastAssistantText = '';
   });
 
-  // ── 流式回复：follow-up 回注后，pi 的 assistant 回复以打字机效果推回飞书 ──
-  pi.on('message_start', (_event, ctx) => {
-    const { sid } = sessionInfo(ctx);
-    const task = streamingTasks.get(sid);
-    if (!task || task.finished || task.stream) return;
-    const msg = (_event as { message?: { role?: string } }).message;
-    if (msg?.role !== 'assistant') return;
-
-    // 首个 assistant 消息到达：异步建立流式句柄；期间 delta 先进 buffer
-    void (async () => {
-      const stream = await client?.streamMarkdown(task.target, {
-        replyTo: task.replyTo,
-      });
-      const cur = streamingTasks.get(sid);
-      if (!stream || !cur || cur.finished) {
-        // 启动失败或任务已结束：回退为普通通知（agent_settled 会发 markdown 通知）
-        if (cur && !cur.finished) cur.stream = null;
-        sessionLog(sid)('stream-start-failed', { sid }, 'WARN');
-        return;
-      }
-      cur.stream = stream;
-      // 把建立期间累积的 buffer 一次性刷入，避免丢字
-      for (const chunk of cur.buffer) stream.append(chunk);
-      cur.buffer = [];
-      sessionLog(sid)('stream-started', { sid, messageId: stream.messageId }, 'INFO');
-    })();
-  });
-
-  pi.on('message_update', (_event, ctx) => {
-    const { sid } = sessionInfo(ctx);
-    const msg = (_event as { message?: { role?: string } }).message;
-    if (msg?.role !== 'assistant') return;
-    const evt = (_event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
-    // 只累计可见文本增量（text_delta），跳过 thinking / toolCall args
-    if (evt?.type === 'text_delta' && typeof evt.delta === 'string') {
-      pushStreamChunk(sid, evt.delta);
-    }
-  });
-
-  pi.on('message_end', async (_event, ctx) => {
-    // 不立即收尾：agent 可能有多轮（工具调用后继续），留到 agent_settled 统一合并
-    const { sid } = sessionInfo(ctx);
-    const msg = (_event as { message?: { role?: string; content?: unknown } }).message;
-    if (msg?.role !== 'assistant') return;
-    const task = streamingTasks.get(sid);
-    if (!task || task.finished) return;
-    // 万一没有 text_delta（如纯工具调用轮），用最终权威文本兜底
-    const final = extractAssistantText(msg.content);
-    if (final) {
-      if (task.stream) {
-        task.stream.setContent(final);
-      } else {
-        task.buffer = [final];
-      }
-    }
-  });
-
   pi.on('agent_end', async (_event, ctx) => {
     // 记录最近一次 assistant 文本，供 agent_settled 发通知用
     const branch = ctx.sessionManager.getBranch();
@@ -434,6 +364,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     // 只在空闲时通知（避免 stream 中打扰）
     if (!ctx.isIdle()) return;
 
+    // 停掉 follow-up 的进度心跳（若有），并给回执打个「已完成」收尾
+    stopProgress(sid, true);
+
     // 静音 / 时长过滤
     if (!shouldNotify(sid, cfg)) {
       taskStarts.delete(sid);
@@ -441,19 +374,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     }
     taskStarts.delete(sid);
 
-    // 合并流式回复：本次任务已有流式消息（follow-up 回注）→ 收尾即可，不再发第二条通知
-    const stream = finishStreamTask(sid);
-    if (stream) {
-      void stream.done().then(() => {
-        if (stream.messageId) {
-          router.record(stream.messageId, sid);
-          sessionLog(sid)('stream-settled', { sid, messageId: stream.messageId });
-        }
-      });
-      return;
-    }
-
-    // 未流式：发一条 markdown（或 text）通知
+    // 发一条 markdown（或 text）通知：只含过滤后的最终结果文字
     const project = basename(ctx.cwd) || ctx.cwd;
     const time = new Date().toLocaleString(
       sessionLocale(sid) === 'zh' ? 'zh-CN' : 'en-US',
@@ -484,9 +405,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     taskStarts.delete(sid);
     muted.delete(sid);
     registry.unregister(sid);
-    // 清理流式状态：收尾进行中的流式消息
-    const stream = finishStreamTask(sid);
-    if (stream) void stream.done().catch(() => undefined);
+    // 清理进度心跳，避免残留定时器
+    stopProgress(sid);
     if (currentSid === sid) currentSid = undefined;
     sessionLog(sid)('session-shutdown', { sid });
   });
@@ -553,7 +473,6 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
           `muted=${muted.has(sid)}`,
           `minDurationMs=${minMs > 0 ? `${minMs}ms` : 'off'}`,
           `format=${cfg.messageFormat ?? 'markdown'}`,
-          `streamReplies=${cfg.streamReplies !== false}`,
           `autoUserId=${discoveredUserId ? '✓' : '✗'}`,
         ];
         ctx.ui.notify(
