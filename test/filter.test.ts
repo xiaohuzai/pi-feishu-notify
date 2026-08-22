@@ -69,8 +69,12 @@ describe('shouldLog', () => {
 
 describe('shouldHandle', () => {
   // ── 基础规则 ──────────────────────────────────────────────
-  it('非文本消息不处理', () => {
-    expect(shouldHandle(msg({ rawContentType: 'post' }), {})).toBe(false);
+  it('text / post 消息可处理，其它类型不处理', () => {
+    expect(shouldHandle(msg({ rawContentType: 'text' }), {})).toBe(true);
+    // post 富文本（SDK 已转纯文本）也处理，兼容 markdown 通知的回复
+    expect(shouldHandle(msg({ rawContentType: 'post' }), {})).toBe(true);
+    expect(shouldHandle(msg({ rawContentType: 'image' }), {})).toBe(false);
+    expect(shouldHandle(msg({ rawContentType: 'sticker' }), {})).toBe(false);
   });
 
   it('机器人自己发的消息不处理', () => {

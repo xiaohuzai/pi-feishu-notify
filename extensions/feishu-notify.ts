@@ -15,12 +15,13 @@ import type {
   ExtensionContext,
 } from '@earendil-works/pi-coding-agent';
 import { loadConfig, canSend } from '../src/config.js';
-import { getFeishuClient, type FeishuClient } from '../src/feishu.js';
+import { getFeishuClient, type FeishuClient, type MarkdownStream } from '../src/feishu.js';
 import { NotificationRouter, ClaimDedup } from '../src/router.js';
 import { SessionRegistry } from '../src/sessions.js';
 import { passesDurationFilter, shouldHandle, shouldLog, type LogVerbosity } from '../src/filter.js';
 import { persistDiscovered } from '../src/settings.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
+import { extractAssistantText, extractReplyText, buildNotification, type NotificationMeta } from '../src/notify.js';
 import type { FeishuMessage, FeishuNotifyConfig } from '../src/types.js';
 
 /** 记录收到消息的去重集合（进程内，避免 SDK 自身 dedup 外的重复触发）。 */
@@ -48,25 +49,6 @@ function makeLog(cfg: FeishuNotifyConfig): (event: string, data?: Record<string,
 
 /** 是否应该处理这条上行消息（回复通知回注场景）。已抽取为纯函数 src/filter.ts#shouldHandle。 */
 // (逻辑已迁移到 filter.ts，见下方 handleIncoming 调用点)
-
-/** 从回复消息里提取要回注的文本。 */
-function extractReplyText(msg: FeishuMessage): string {
-  return msg.content.trim();
-}
-
-/** 从 assistant 消息的 content 数组里提取纯文本（跳过 thinking / toolCall）。 */
-function extractAssistantText(content: unknown): string {
-  if (typeof content === 'string') return content;
-  if (!Array.isArray(content)) return '';
-  const parts: string[] = [];
-  for (const part of content) {
-    if (part && typeof part === 'object' && (part as { type?: string }).type === 'text') {
-      const text = (part as { text?: unknown }).text;
-      if (typeof text === 'string') parts.push(text);
-    }
-  }
-  return parts.join('\n').trim();
-}
 
 export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // 每个 session 关联的配置（session_start 时刷新）
@@ -102,6 +84,46 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   const log = makeLog({});
   // 最近一次 agent 回复文本（agent_end 时更新，agent_settled 时发送）
   let lastAssistantText = '';
+
+  // ── 流式回复状态（on-followup）──
+  // 用户从飞书回复通知回注指令后，把 pi 的回复以打字机效果流式推回飞书。
+  // 每个 follow-up 任务一个 streamingTask：
+  //  - buffer：assistant 文本增量累积（stream 就绪前也能缓存，避免丢字）
+  //  - stream：已就绪的流式句柄（异步建立，建立后先把 buffer 里已累积的 flush 进去）
+  //  - target/replyTo：发送目标 + 要回复的用户消息 id
+  type StreamingTask = {
+    buffer: string[];
+    stream: MarkdownStream | null;
+    target: { userId?: string; chatId?: string };
+    replyTo: string;
+    finished: boolean;
+  };
+  const streamingTasks = new Map<string, StreamingTask>();
+
+  /** 记录一段文本增量到流式任务（未就绪则先入 buffer）。 */
+  function pushStreamChunk(sid: string, chunk: string): void {
+    if (!chunk) return;
+    const task = streamingTasks.get(sid);
+    if (!task || task.finished) return;
+    if (task.stream) {
+      task.stream.append(chunk);
+    } else {
+      task.buffer.push(chunk);
+    }
+  }
+
+  /** 把流式任务置为完成：结束句柄并返回其 messageId（用于路由）。 */
+  function finishStreamTask(sid: string): MarkdownStream | null {
+    const task = streamingTasks.get(sid);
+    if (!task || task.finished) return null;
+    task.finished = true;
+    streamingTasks.delete(sid);
+    if (task.stream) {
+      void task.stream.done().catch(() => undefined);
+      return task.stream;
+    }
+    return null;
+  }
 
   /** 获取当前 session 的 sid + 是否允许发送。 */
   function sessionInfo(ctx: ExtensionContext): { sid: string; cfg: FeishuNotifyConfig } {
@@ -153,7 +175,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     // 跨进程去重认领
     if (!dedup.claim(msg.messageId, targetSid)) return;
 
-    const text = extractReplyText(msg);
+    const text = extractReplyText(msg.content, msg.rawContentType);
     if (!text) return;
 
     sessionLog(targetSid)('reply-injected', { to: targetSid, from: msg.senderName ?? msg.senderId, text });
@@ -202,6 +224,24 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     try {
       await pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
       sendReceipt(sid, `已收到你的回复：「${text}」，正在处理…`);
+      // 标记「本次 follow-up 需要流式回推」：下一个 assistant 消息开始流式
+      const cfg = configs.get(sid);
+      if (cfg && cfg.enabled !== false && cfg.streamReplies !== false) {
+        const target = resolveSendTarget(cfg, sessionLog(sid));
+        if (target.userId || target.chatId) {
+          // 预建任务（含 buffer），首个 assistant 消息到达时启动流式
+          if (!streamingTasks.has(sid)) {
+            streamingTasks.set(sid, {
+              buffer: [],
+              stream: null,
+              target,
+              replyTo: msg.messageId,
+              finished: false,
+            });
+          }
+          sessionLog(sid)('stream-marked', { to: sid, replyTo: msg.messageId }, 'INFO');
+        }
+      }
     } catch (err) {
       // print 模式（-p）收尾时 session 可能已关闭导致 ctx stale，
       // 此时回注失败不影响通知/路由，仅记日志 + 回执告知用户即可。
@@ -306,6 +346,63 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     lastAssistantText = '';
   });
 
+  // ── 流式回复：follow-up 回注后，pi 的 assistant 回复以打字机效果推回飞书 ──
+  pi.on('message_start', (_event, ctx) => {
+    const { sid } = sessionInfo(ctx);
+    const task = streamingTasks.get(sid);
+    if (!task || task.finished || task.stream) return;
+    const msg = (_event as { message?: { role?: string } }).message;
+    if (msg?.role !== 'assistant') return;
+
+    // 首个 assistant 消息到达：异步建立流式句柄；期间 delta 先进 buffer
+    void (async () => {
+      const stream = await client?.streamMarkdown(task.target, {
+        replyTo: task.replyTo,
+      });
+      const cur = streamingTasks.get(sid);
+      if (!stream || !cur || cur.finished) {
+        // 启动失败或任务已结束：回退为普通通知（agent_settled 会发 markdown 通知）
+        if (cur && !cur.finished) cur.stream = null;
+        sessionLog(sid)('stream-start-failed', { sid }, 'WARN');
+        return;
+      }
+      cur.stream = stream;
+      // 把建立期间累积的 buffer 一次性刷入，避免丢字
+      for (const chunk of cur.buffer) stream.append(chunk);
+      cur.buffer = [];
+      sessionLog(sid)('stream-started', { sid, messageId: stream.messageId }, 'INFO');
+    })();
+  });
+
+  pi.on('message_update', (_event, ctx) => {
+    const { sid } = sessionInfo(ctx);
+    const msg = (_event as { message?: { role?: string } }).message;
+    if (msg?.role !== 'assistant') return;
+    const evt = (_event as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
+    // 只累计可见文本增量（text_delta），跳过 thinking / toolCall args
+    if (evt?.type === 'text_delta' && typeof evt.delta === 'string') {
+      pushStreamChunk(sid, evt.delta);
+    }
+  });
+
+  pi.on('message_end', async (_event, ctx) => {
+    // 不立即收尾：agent 可能有多轮（工具调用后继续），留到 agent_settled 统一合并
+    const { sid } = sessionInfo(ctx);
+    const msg = (_event as { message?: { role?: string; content?: unknown } }).message;
+    if (msg?.role !== 'assistant') return;
+    const task = streamingTasks.get(sid);
+    if (!task || task.finished) return;
+    // 万一没有 text_delta（如纯工具调用轮），用最终权威文本兜底
+    const final = extractAssistantText(msg.content);
+    if (final) {
+      if (task.stream) {
+        task.stream.setContent(final);
+      } else {
+        task.buffer = [final];
+      }
+    }
+  });
+
   pi.on('agent_end', async (_event, ctx) => {
     // 记录最近一次 assistant 文本，供 agent_settled 发通知用
     const branch = ctx.sessionManager.getBranch();
@@ -335,26 +432,34 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     }
     taskStarts.delete(sid);
 
-    // 通知文本：带上项目名 + 会话 ID（前 8 位）+ 时间，多任务可区分
+    // 合并流式回复：本次任务已有流式消息（follow-up 回注）→ 收尾即可，不再发第二条通知
+    const stream = finishStreamTask(sid);
+    if (stream) {
+      void stream.done().then(() => {
+        if (stream.messageId) {
+          router.record(stream.messageId, sid);
+          sessionLog(sid)('stream-settled', { sid, messageId: stream.messageId });
+        }
+      });
+      return;
+    }
+
+    // 未流式：发一条 markdown（或 text）通知
     const project = basename(ctx.cwd) || ctx.cwd;
     const time = new Date().toLocaleString('zh-CN', { hour12: false });
-    const lines = [
-      '✅ pi 主对话已完成',
-      `项目: ${project}`,
-      `会话: ${sid.slice(0, 8)}`,
-      `时间: ${time}`,
-    ];
-    if (lastAssistantText) lines.push('', lastAssistantText);
-    lines.push('', '回复本消息可继续指挥该会话。');
-    const text = lines.join('\n');
-
-    void client?.sendText(text, resolveSendTarget(cfg, sessionLog(sid))).then((r) => {
+    const meta: NotificationMeta = { project, sid, time };
+    const { format, content } = buildNotification(cfg, meta, lastAssistantText || undefined);
+    const target = resolveSendTarget(cfg, sessionLog(sid));
+    const send = format === 'text'
+      ? client?.sendText(content, target)
+      : client?.sendMarkdown(content, target);
+    void send?.then((r) => {
       if (r.ok && r.messageId) {
         router.record(r.messageId, sid);
         // 成功通知仅 verbose 时输出，避免刷屏
         sessionLog(sid)('notification-sent', { sid, messageId: r.messageId });
       } else {
-        sessionLog(sid)('notification-failed', { sid, error: r.error }, 'ERROR');
+        sessionLog(sid)('notification-failed', { sid, error: r?.error }, 'ERROR');
       }
     });
   });
@@ -367,6 +472,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     taskStarts.delete(sid);
     muted.delete(sid);
     registry.unregister(sid);
+    // 清理流式状态：收尾进行中的流式消息
+    const stream = finishStreamTask(sid);
+    if (stream) void stream.done().catch(() => undefined);
     if (currentSid === sid) currentSid = undefined;
     sessionLog(sid)('session-shutdown', { sid });
   });
@@ -431,6 +539,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         const extra = [
           `muted=${muted.has(sid)}`,
           `minDurationMs=${minMs > 0 ? `${minMs}ms` : 'off'}`,
+          `format=${cfg.messageFormat ?? 'markdown'}`,
+          `streamReplies=${cfg.streamReplies !== false}`,
           `autoUserId=${discoveredUserId ? '✓' : '✗'}`,
         ];
         ctx.ui.notify(
@@ -444,7 +554,11 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         ctx.ui.notify('feishu-notify: 未配置或已禁用（需要 appId/appSecret/userId）', 'warning');
         return;
       }
-      const r = await client?.sendText(args.trim(), resolveSendTarget(cfg, logc));
+      const target = resolveSendTarget(cfg, logc);
+      const send = cfg.messageFormat === 'text'
+        ? client?.sendText(args.trim(), target)
+        : client?.sendMarkdown(args.trim(), target);
+      const r = await send;
       if (r?.ok) {
         if (r.messageId) router.record(r.messageId, sid);
         ctx.ui.notify('已发送到飞书 ✓', 'info');

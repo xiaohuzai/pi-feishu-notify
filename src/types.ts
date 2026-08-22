@@ -45,6 +45,18 @@ export interface FeishuNotifyConfig {
    * 设置为 'quiet' 或 'normal' 可减少通知日志对对话的干扰。
    */
   logLevel?: 'quiet' | 'normal' | 'verbose';
+  /**
+   * 通知/回复的消息格式：
+   *  - 'markdown'：飞书 post 富文本渲染（标题/加粗/代码块等），默认
+   *  - 'text'    ：纯文本（兼容旧行为）
+   */
+  messageFormat?: 'markdown' | 'text';
+  /**
+   * 流式回复开关（默认 true）：
+   * 用户从飞书回复通知指挥 pi 继续时，把 pi 的回复以打字机效果流式推回飞书。
+   * 置 false 则回退为「任务完成后发一条 markdown 通知」。
+   */
+  streamReplies?: boolean;
 }
 
 /** 飞书事件（SDK NormalizedMessage 的简化映射） */
