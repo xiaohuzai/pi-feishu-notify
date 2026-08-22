@@ -26,9 +26,43 @@ export class FeishuConfigError extends Error {
   }
 }
 
+/** 流式消息句柄：由 streamMarkdown 返回，桥接 pi 的 token 事件 → 飞书打字机。 */
+export interface MarkdownStream {
+  /** 推送增量文本（异步落盘，不阻塞调用方）。 */
+  append(chunk: string): void;
+  /** 推送全量文本（替换当前内容）。 */
+  setContent(full: string): void;
+  /** 结束流式：关闭打字机光标、落定最终内容。 */
+  done(): Promise<void>;
+  /** 已发送消息的 message_id（流开始后即有值）。 */
+  readonly messageId: string;
+}
+
+/** 发送目标（userId 优先，其次 chatId）。 */
+export interface FeishuTarget {
+  userId?: string;
+  chatId?: string;
+}
+
+/** 发送/流式选项。 */
+export interface FeishuSendOptions {
+  /** 回复到指定消息（该消息的 message_id）。 */
+  replyTo?: string;
+  /** 是否以话题线程方式回复。 */
+  replyInThread?: boolean;
+}
+
 export interface FeishuClient {
   /** 发送文本消息，成功返回 message_id。 */
-  sendText(text: string, cfg: { userId?: string; chatId?: string }): Promise<SendResult>;
+  sendText(text: string, cfg: FeishuTarget): Promise<SendResult>;
+  /** 发送 markdown 消息（飞书 post 富文本渲染），成功返回 message_id。 */
+  sendMarkdown(markdown: string, cfg: FeishuTarget, opts?: FeishuSendOptions): Promise<SendResult>;
+  /**
+   * 开始一条流式 markdown 消息（飞书原生打字机效果）。
+   * 返回句柄后即可 append/setContent 推送增量，最后 done() 收尾。
+   * 返回 null 表示目标缺失或未连接（调用方决定是否回退为普通通知）。
+   */
+  streamMarkdown(cfg: FeishuTarget, opts?: FeishuSendOptions): Promise<MarkdownStream | null>;
   /** 订阅消息事件，返回 unsubscribe。单 handler 替换：新订阅会替换旧订阅。 */
   subscribe(handler: (msg: FeishuMessage) => void): () => void;
   /** 显式关闭连接（仅进程退出/测试清理使用）。 */
@@ -53,12 +87,33 @@ function resolveLoggerLevel(value: unknown): lark.LoggerLevel {
 }
 
 function normalizeTextContent(content: string): string {
-  try {
-    const parsed = JSON.parse(content) as { text?: unknown };
-    return typeof parsed.text === 'string' ? parsed.text : '';
-  } catch {
-    return content;
+  // 只对「看起来是 JSON」的 content 做解析（text 消息 content 是 {"text":"..."}）；
+  // SDK 对 post 消息已转成纯文本，纯文本即使是合法 JSON（如 "123"）也不该被误拆。
+  const trimmed = content.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(content) as { text?: unknown };
+      return typeof parsed.text === 'string' ? parsed.text : '';
+    } catch {
+      // fallthrough → 原样返回
+    }
   }
+  return content;
+}
+
+/** 解析发送目标为 SDK 的 to 字符串（userId 优先，其次 chatId）。 */
+function resolveTarget(cfg: FeishuTarget): string {
+  return cfg.userId ?? cfg.chatId ?? '';
+}
+
+/** 轮询等待条件成立（带超时），默认 5ms 间隔。 */
+async function waitFor(cond: () => boolean, timeoutMs: number, intervalMs = 5): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return true;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  return cond();
 }
 
 /** SDK 长连接通道 → 简化 FeishuMessage。 */
@@ -146,6 +201,90 @@ class SdkFeishuClient implements FeishuClient {
       this.subscribers.delete(handler);
       if (this.currentHandler === handler) this.currentHandler = null;
     };
+  }
+
+  async sendMarkdown(
+    markdown: string,
+    cfg: FeishuTarget,
+    opts: FeishuSendOptions = {},
+  ): Promise<SendResult> {
+    const to = resolveTarget(cfg);
+    if (!to) {
+      return { ok: false, error: 'feishu-notify: 缺少发送目标（userId/chatId）' };
+    }
+    try {
+      const channel = await this.ensureConnectedChannel();
+      const result = await channel.send(to, { markdown }, opts);
+      return { ok: true, messageId: result.messageId };
+    } catch (err) {
+      return { ok: false, error: `飞书发送异常: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+
+  async streamMarkdown(
+    cfg: FeishuTarget,
+    opts: FeishuSendOptions = {},
+  ): Promise<MarkdownStream | null> {
+    const to = resolveTarget(cfg);
+    if (!to) return null;
+    try {
+      const channel = await this.ensureConnectedChannel();
+      let controller: lark.MarkdownStreamController | null = null;
+      let resolveDone: ((value: void | PromiseLike<void>) => void) | undefined;
+      const donePromise = new Promise<void>((r) => {
+        resolveDone = r;
+      });
+      const runPromise = channel.stream(
+        to,
+        {
+          markdown: async (ctrl) => {
+            controller = ctrl;
+            await donePromise;
+          },
+        },
+        opts,
+      );
+      // 等待 SDK 建好占位卡片并赋值 controller
+      await waitFor(() => controller !== null, 8000);
+      if (!controller) {
+        // 超时：让 run 自然结束（producer 已在等 done），然后报错
+        resolveDone?.();
+        void runPromise.catch(() => undefined);
+        return null;
+      }
+      return {
+        get messageId() {
+          return controller?.messageId ?? '';
+        },
+        append(chunk: string) {
+          if (controller && chunk) void controller.append(chunk).catch(() => undefined);
+        },
+        setContent(full: string) {
+          if (controller) void controller.setContent(full).catch(() => undefined);
+        },
+        async done() {
+          resolveDone?.();
+          await runPromise.catch(() => undefined);
+        },
+      };
+    } catch (err) {
+      this.log('feishu-stream-failed', { error: err instanceof Error ? err.message : String(err) }, 'ERROR');
+      return null;
+    }
+  }
+
+  private async ensureConnectedChannel(): Promise<lark.LarkChannel> {
+    if (this.channel) {
+      const ready = await waitFor(() => this.connected, 8000);
+      if (ready && this.channel) return this.channel;
+    }
+    // 尚未建连：主动建一个（与 subscribe 共用 ensureChannel 逻辑）
+    this.ensureChannel();
+    const ok = await waitFor(() => this.channel !== null && this.connected, 8000);
+    if (!ok || !this.channel) {
+      throw new Error('飞书长连接未就绪');
+    }
+    return this.channel;
   }
 
   private getClient(): lark.Client {

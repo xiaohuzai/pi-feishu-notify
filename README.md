@@ -10,6 +10,8 @@
 - ✅ **session 级通知**：任务结束（`agent_settled`）自动推送飞书通知
 - ✅ **回复回注**：在飞书里回复通知，指令自动注入对应 pi 会话继续执行
 - ✅ **双向桥**：pi → 飞书（通知）/ 飞书 → pi（指令）
+- ✅ **markdown 美化**：通知默认以飞书富文本（post）渲染，标题/加粗/代码块/引用清晰美观
+- ✅ **流式回复**：在飞书回复通知指挥 pi 后，pi 的回复以「打字机」效果实时流式推回飞书（原生卡片流式）
 - ✅ **跨进程去重**：多 pi 进程场景下同一消息只处理一次
 - ✅ **崩溃自愈**：自动清理死进程残留状态
 - ✅ **配置灵活**：全局 + 项目级覆盖，支持环境变量插值，自动识别 userId/chatId
@@ -57,7 +59,9 @@ pi install ./path/to/pi-feishu-notify
     "allowedChatIds": [],           // 群聊白名单（chat_id 列表）；不填时仍会放行"通知目标 chatId"与"自动识别过的群"里的回复
     "includeSummary": true,
     "minDurationMs": 0,             // 任务最短时长（毫秒），>= 该值才发通知；0/缺省=不限制
-    "logLevel": "normal"             // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
+    "logLevel": "normal",           // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
+    "messageFormat": "markdown",    // 通知/回复格式：'markdown'（默认，飞书富文本）| 'text'（纯文本）
+    "streamReplies": true           // 流式回复：在飞书回复通知指挥 pi 后，pi 的回复以打字机效果流式推回（默认开）
   }
 }
 ```
@@ -122,10 +126,49 @@ pi install ./path/to/pi-feishu-notify
       └────────────────┴── 指令回注
 ```
 
-- **下行**：`agent_settled` → `client.im.message.create` 发送通知，拿到 `message_id`，记录到 `~/.pi/agent/feishu-notify-router.json`（`message_id → session` 映射）
+- **下行**：`agent_settled` → 发送 markdown 富文本通知（或 follow-up 场景的流式卡片），拿到 `message_id`，记录到 `~/.pi/agent/feishu-notify-router.json`（`message_id → session` 映射）
 - **上行**：SDK 长连接收到消息 → 若 `replyToMessageId` 命中路由表 → 跨进程去重认领 → `pi.sendUserMessage` 回注指令
 - **常驻单例**：WebSocket consumer 是进程级单例，跨 session 共享，不随 session 切换断开
 - **去重**：`~/.pi/agent/feishu-notify-dedup.json` 记录已处理消息，跨进程互斥
+
+## markdown 美化 & 流式回复
+
+### 通知 markdown 美化（默认）
+
+任务完成通知默认以飞书富文本（`post` 消息 + `md` 元素）发送，由飞书原生渲染标题、加粗、列表、代码块、引用：
+
+```markdown
+## ✅ pi 主对话已完成
+
+**项目**：my-app
+**会话**：a1b2c3d4
+**时间**：2026-08-21 12:00:00
+
+---
+
+（任务摘要，代码块/列表原样保留）
+
+> 回复本消息可继续指挥该会话
+```
+
+设为 `messageFormat: "text"` 可回退为纯文本。
+
+### 流式回复（follow-up 打字机效果）
+
+当你在飞书**回复通知**指挥 pi 继续时，pi 的回复会以「打字机」效果实时流式推回飞书：
+
+1. 你回复通知 → 收到「已收到你的回复，正在处理…」回执
+2. pi 开始处理 → 飞书里出现一张流式卡片，内容随 token 逐字输出（原生卡片流式动画）
+3. 处理完成 → 流式卡片收尾（关闭打字光标），**不再额外发一条「已完成」通知**（合并）
+4. 你仍可继续回复这条流式消息再次指挥
+
+`streamReplies: false` 可关闭流式，回退为「任务完成后发一条 markdown 通知」。
+
+> 仅 **follow-up**（你从飞书回复指挥）场景流式；初始任务（本地发起）仍是任务完成后发一条通知，避免刷屏。
+
+### 回复兼容
+
+SDK 会把收到的富文本（post）消息转成纯文本，因此无论你回复的是 markdown 通知、流式卡片还是普通文本消息，回注指令都能正确提取。
 
 ## 文件结构
 
@@ -140,6 +183,7 @@ pi-feishu-notify/
 │   ├── router.ts            # 通知路由 + 跨进程去重
 │   ├── sessions.ts          # 会话注册表（崩溃自愈）
 │   ├── filter.ts            # 发送/日志过滤（minDurationMs、logLevel）
+│   ├── notify.ts            # 通知内容构建（markdown 美化 + 回复文本提取）
 │   ├── settings.ts          # 自动识别 ID 持久化（/feishu-notify bind）
 │   ├── discovery.ts         # 识别结果跨进程持久化（重启提示用）
 │   └── state.ts             # 状态文件原子读写 + 目录锁

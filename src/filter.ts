@@ -45,7 +45,7 @@ export function shouldLog(
  * 是否应该处理这条上行消息（回复通知回注场景）。纯函数，可单测。
  *
  * 规则：
- *  - 只看文本消息；忽略机器人自己发的消息
+ *  - 只看文本消息（text）或富文本消息（post，SDK 已转纯文本）；忽略机器人自己发的消息
  *  - 私聊：配置了 allowedSenderIds 则必须在白名单内；否则任意私聊都处理
  *  - 群聊：必须来自「已知群」——
  *      cfg.allowedChatIds 显式配置的群 ∪ cfg.chatId（通知目标群）∪ knownChatIds（自动识别过的群）
@@ -60,8 +60,8 @@ export function shouldHandle(
   cfg: FeishuNotifyConfig,
   knownChatIds?: ReadonlySet<string> | ReadonlyMap<string, unknown>,
 ): boolean {
-  // 只看文本消息
-  if (msg.rawContentType !== 'text') return false;
+  // 只看文本/富文本消息（post 的 content 已被 SDK 转成纯文本）
+  if (msg.rawContentType !== 'text' && msg.rawContentType !== 'post') return false;
   // 忽略自己（机器人）发的消息
   if (msg.senderName && msg.senderName.startsWith('@')) return false;
   if (msg.senderName === 'pi-feishu-notify') return false;
