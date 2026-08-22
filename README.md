@@ -14,7 +14,7 @@
 - ✅ **Bidirectional bridge**: pi → Feishu (notifications) / Feishu → pi (instructions)
 - ✅ **Markdown formatting**: notifications render as Feishu rich text (`post`) with clean titles, bold, code blocks, and quotes
 - ✅ **Final result only**: follow-up replies send only the filtered final result (markdown notification) — thinking/tool-call content never reaches Feishu
-- ✅ **Progress feedback**: long tasks refresh an elapsed-time progress line in place on the receipt, so you never wait blindly
+- ✅ **Progress feedback**: long tasks refresh an elapsed-time progress line (plus project/session) in place on the receipt, so you never wait blindly
 - ✅ **Cross-process dedup**: the same message is processed only once across multiple pi processes
 - ✅ **Crash self-healing**: automatically cleans up residual state from dead processes
 - ✅ **Flexible config**: global + project-level overrides, environment variable interpolation, auto-detect `userId`/`chatId`
@@ -165,7 +165,7 @@ Set `messageFormat: "text"` to fall back to plain text.
 When you **reply to a notification** in Feishu to command pi to continue:
 
 1. The reply is received → a "received your reply, processing…" receipt is sent immediately
-2. Long tasks → the receipt message is **updated in place** with "⏳ Still working… Ns elapsed" (every 15s by default, via `im.v1.message.update`), so you know the bot is alive and working — no blind waiting
+2. Long tasks → the receipt message is **updated in place** with "⏳ Still working… Ns elapsed — project: xxx / session: a1b2c3d4" (every 15s by default, via `im.v1.message.update`), so you know the bot is alive, working, and which project/session it's handling — no blind waiting
 3. Done → the receipt updates to "✅ Done — see the result in the next message", then a **new markdown notification** is sent containing only the filtered **final result** (`lastAssistantText`: the last assistant message passed through `extractAssistantText`, which skips `thinking`/`toolCall` parts)
 4. You can reply to that final result message to keep commanding
 
