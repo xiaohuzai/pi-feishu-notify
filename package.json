@@ -1,6 +1,6 @@
 {
   "name": "pi-feishu-notify",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Bidirectional bridge between pi main conversations and Feishu (Lark): sends a Feishu notification when a pi task finishes, and lets you reply to the notification in Feishu to remotely command that pi session to continue. No lark-cli dependency, built on the official SDK long connection. 支持中英文（i18n）。",
   "keywords": [
     "pi-package",
