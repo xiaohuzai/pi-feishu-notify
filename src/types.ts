@@ -57,6 +57,11 @@ export interface FeishuNotifyConfig {
    * 置 false 则回退为「任务完成后发一条 markdown 通知」。
    */
   streamReplies?: boolean;
+  /**
+   * 界面语言：'auto'（默认，按 LANG 环境变量自动判断）| 'en'（英文）| 'zh'（中文）。
+   * 影响飞书通知、回执、/feishu-notify 命令输出等用户可见文本。
+   */
+  locale?: 'auto' | 'en' | 'zh';
 }
 
 /** 飞书事件（SDK NormalizedMessage 的简化映射） */

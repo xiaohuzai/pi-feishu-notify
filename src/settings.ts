@@ -7,6 +7,7 @@
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { FeishuNotifyConfig } from './types.js';
+import { resolveLocale, messages } from './i18n.js';
 
 export interface PersistResult {
   ok: boolean;
@@ -36,8 +37,9 @@ export function persistDiscovered(
       }
     }
     const section = (settings['feishu-notify'] ??= {});
+    const err = messages(resolveLocale(cfg.locale)).error;
     if (typeof section !== 'object' || section === null || Array.isArray(section)) {
-      return { ok: false, error: 'feishu-notify 节不是对象，无法写入' };
+      return { ok: false, error: err.notObject };
     }
     const written: string[] = [];
     if (!cfg.userId && discoveredUserId) {
@@ -50,7 +52,7 @@ export function persistDiscovered(
       written.push('chatId');
     }
     if (written.length === 0) {
-      return { ok: false, error: '未发现需要补写的字段（userId/chatId 已配置，或多个群聊无法确定）' };
+      return { ok: false, error: err.nothingToWrite };
     }
     mkdirSync(join(cwd, '.pi'), { recursive: true });
     writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');

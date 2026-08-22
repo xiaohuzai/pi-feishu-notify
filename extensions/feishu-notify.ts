@@ -22,6 +22,7 @@ import { passesDurationFilter, shouldHandle, shouldLog, type LogVerbosity } from
 import { persistDiscovered } from '../src/settings.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
 import { extractAssistantText, extractReplyText, buildNotification, type NotificationMeta } from '../src/notify.js';
+import { resolveLocale, messages, format, type Locale } from '../src/i18n.js';
 import type { FeishuMessage, FeishuNotifyConfig } from '../src/types.js';
 
 /** 记录收到消息的去重集合（进程内，避免 SDK 自身 dedup 外的重复触发）。 */
@@ -137,6 +138,11 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     return logs.get(sid) ?? log;
   }
 
+  /** 某 session 的界面语言（默认 auto 探测）。 */
+  function sessionLocale(sid: string): Locale {
+    return resolveLocale(configs.get(sid)?.locale);
+  }
+
   /** 订阅飞书长连接（进程级单例，首次调用建立）。 */
   function ensureSubscribed(cfg: FeishuNotifyConfig): void {
     if (!cfg.appId || !cfg.appSecret) return;
@@ -212,18 +218,20 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       const sameProject = Boolean(entry && curCwd && entry.cwd === curCwd);
       if (!sameProject) {
         sessionLog(sid)('reply-session-gone', { to: sid, sameProject: false }, 'WARN');
-        sendReceipt(sid, '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。');
+        sendReceipt(sid, messages(sessionLocale(sid)).receipt.sessionGone);
         return;
       }
       sessionLog(sid)('reply-stale-session', { to: sid, fallbackTo: currentSid, sameProject: true }, 'WARN');
       sid = currentSid as string;
     }
+    const t = messages(sessionLocale(sid));
     const prompt =
-      `[feishu-notify] 飞书用户${msg.senderName ? `「${msg.senderName}」` : ''}回复了通知，` +
-      `请求：${text}`;
+      `[feishu-notify] ${format(t.inject.prompt, {
+        name: msg.senderName ? ` 「${msg.senderName}」` : '',
+      })}${text}`;
     try {
       await pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
-      sendReceipt(sid, `已收到你的回复：「${text}」，正在处理…`);
+      sendReceipt(sid, `${t.receipt.received}（${text}）`);
       // 标记「本次 follow-up 需要流式回推」：下一个 assistant 消息开始流式
       const cfg = configs.get(sid);
       if (cfg && cfg.enabled !== false && cfg.streamReplies !== false) {
@@ -247,7 +255,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       // 此时回注失败不影响通知/路由，仅记日志 + 回执告知用户即可。
       const msg_ = err instanceof Error ? err.message : String(err);
       sessionLog(sid)('inject-failed', { error: msg_ }, 'WARN');
-      sendReceipt(sid, `转达失败：${msg_}`);
+      sendReceipt(sid, `${t.receipt.relayFailed}${msg_}`);
     }
   }
 
@@ -257,7 +265,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     if (!cfg || cfg.receipt === false) return;
     const project = basename(sessionCwds.get(sid) ?? '') || '?';
     const target = resolveSendTarget(cfg, sessionLog(sid));
-    void client?.sendText(`${text}\n\n项目: ${project}`, target).then((r) => {
+    void client?.sendText(`${text}\n\n${messages(sessionLocale(sid)).notification.project}: ${project}`, target).then((r) => {
       if (!r.ok) sessionLog(sid)('receipt-failed', { error: r.error }, 'ERROR');
     });
   }
@@ -277,7 +285,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       warnedAutoTarget = true;
       logc(
         'auto-target',
-        { userId: discoveredUserId, hint: 'settings.json 未配置 userId，已回退到自动识别值；可用 /feishu-notify bind 持久化' },
+        { userId: discoveredUserId, hint: messages(resolveLocale(cfg.locale)).hint.autoTarget },
         'WARN',
       );
     }
@@ -325,8 +333,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     ) {
       startupHintShown = true;
       ctx.ui.notify(
-        `feishu-notify: 已自动识别你的 open_id（${discoveredUserId.slice(0, 12)}…），但 settings.json 尚未配置 userId。` +
-          `可执行 /feishu-notify bind 一键写入，或 /feishu-notify whoami 查看。`,
+        format(messages(sessionLocale(sid)).hint.startupBind, {
+          openid: discoveredUserId.slice(0, 12),
+        }),
         'info',
       );
     }
@@ -446,7 +455,10 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
 
     // 未流式：发一条 markdown（或 text）通知
     const project = basename(ctx.cwd) || ctx.cwd;
-    const time = new Date().toLocaleString('zh-CN', { hour12: false });
+    const time = new Date().toLocaleString(
+      sessionLocale(sid) === 'zh' ? 'zh-CN' : 'en-US',
+      { hour12: false },
+    );
     const meta: NotificationMeta = { project, sid, time };
     const { format, content } = buildNotification(cfg, meta, lastAssistantText || undefined);
     const target = resolveSendTarget(cfg, sessionLog(sid));
@@ -482,22 +494,23 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   // ── 命令：手动发送通知 / 查看状态 ─────────────────────────────
 
   pi.registerCommand('feishu-notify', {
-    description: '向飞书发送一条通知，或查看扩展状态；off/on 静音，whoami 查看识别到的 ID，bind 持久化',
+    description: messages(resolveLocale(undefined)).command.description,
     handler: async (args, ctx) => {
       const { sid, cfg } = sessionInfo(ctx);
       const logc = sessionLog(sid);
+      const t = messages(sessionLocale(sid)).command;
       const arg = args.trim();
 
       // 静音 / 取消静音：当前 session 不再（或重新）自动发通知
       if (arg === 'off' || arg === 'mute') {
         muted.add(sid);
-        ctx.ui.notify('feishu-notify: 当前会话已静音，任务完成后不再自动发送通知。使用 /feishu-notify on 恢复。', 'info');
+        ctx.ui.notify(t.muted, 'info');
         logc('muted', { sid }, 'INFO');
         return;
       }
       if (arg === 'on' || arg === 'unmute') {
         muted.delete(sid);
-        ctx.ui.notify('feishu-notify: 当前会话已恢复自动通知。', 'info');
+        ctx.ui.notify(t.unmuted, 'info');
         logc('unmuted', { sid }, 'INFO');
         return;
       }
@@ -505,14 +518,14 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       // 查看自动识别的 open_id / chat_id：用户在飞书给机器人发过消息后即可看到
       if (arg === 'whoami' || arg === 'detect') {
         const lines = [
-          `userId（open_id）: ${cfg.userId ?? discoveredUserId ?? '（未识别，先在飞书给机器人发条消息）'}`,
-          `chatId: ${cfg.chatId ?? '（未配置）'}`,
+          `${t.whoamiUser}: ${cfg.userId ?? discoveredUserId ?? t.whoamiUnknown}`,
+          `${t.whoamiChat}: ${cfg.chatId ?? t.whoamiNotConfigured}`,
         ];
         if (discoveredChatIds.size > 0) {
-          lines.push('已识别的群聊 chat_id:');
+          lines.push(t.whoamiKnownChats);
           for (const [cid] of discoveredChatIds) lines.push(`  - ${cid}`);
         }
-        lines.push('把上面的值填到 settings.json 的 feishu-notify 节即可固定，或 /feishu-notify bind 自动写入。');
+        lines.push(t.whoamiHint);
         ctx.ui.notify(lines.join('\n'), 'info');
         return;
       }
@@ -520,16 +533,16 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       // 持久化自动识别的 userId/chatId 到项目 .pi/settings.json
       if (arg === 'bind') {
         if (!discoveredUserId && discoveredChatIds.size === 0) {
-          ctx.ui.notify('feishu-notify: 尚未识别到任何 ID，先在飞书给机器人发一条消息（私聊或群里 @ 机器人）再执行 bind。', 'warning');
+          ctx.ui.notify(t.bindNoIds, 'warning');
           return;
         }
         const result = persistDiscovered(ctx.cwd, cfg, discoveredUserId, [...discoveredChatIds.keys()]);
         if (result.ok) {
           const written = result.written?.join(', ') ?? '';
-          ctx.ui.notify(`feishu-notify: 已写入项目 .pi/settings.json（${written}）。重启会话或 /reload 生效。`, 'info');
+          ctx.ui.notify(format(t.bindWritten, { fields: written }), 'info');
           logc('bound', { ...result.written }, 'INFO');
         } else {
-          ctx.ui.notify(`feishu-notify: 写入失败: ${result.error}`, 'error');
+          ctx.ui.notify(`${t.bindFailed}${result.error}`, 'error');
         }
         return;
       }
@@ -544,14 +557,18 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
           `autoUserId=${discoveredUserId ? '✓' : '✗'}`,
         ];
         ctx.ui.notify(
-          `feishu-notify: enabled=${!!cfg.enabled}, appId=${cfg.appId ? '✓' : '✗'}, ` +
-            `connected=${client?.isConnected() ?? false}, ${extra.join(', ')}`,
+          format(t.status, {
+            enabled: !!cfg.enabled,
+            appId: cfg.appId ? '✓' : '✗',
+            connected: client?.isConnected() ?? false,
+            extra: extra.join(', '),
+          }),
           'info',
         );
         return;
       }
       if (!cfg.enabled || !canSend(cfg)) {
-        ctx.ui.notify('feishu-notify: 未配置或已禁用（需要 appId/appSecret/userId）', 'warning');
+        ctx.ui.notify(t.notConfigured, 'warning');
         return;
       }
       const target = resolveSendTarget(cfg, logc);
@@ -561,9 +578,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       const r = await send;
       if (r?.ok) {
         if (r.messageId) router.record(r.messageId, sid);
-        ctx.ui.notify('已发送到飞书 ✓', 'info');
+        ctx.ui.notify(t.sent, 'info');
       } else {
-        ctx.ui.notify(`发送失败: ${r?.error}`, 'error');
+        ctx.ui.notify(`${t.sendFailed}${r?.error}`, 'error');
       }
     },
   });

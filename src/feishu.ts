@@ -15,6 +15,7 @@ import type {
   FeishuNotifyConfig,
   SendResult,
 } from './types.js';
+import { resolveLocale, messages } from './i18n.js';
 
 const CLIENT_KEY = Symbol.for('pi-feishu-notify.client');
 
@@ -163,8 +164,9 @@ class SdkFeishuClient implements FeishuClient {
     const client = this.getClient();
     const receiveId = cfg.userId ?? cfg.chatId;
     const receiveIdType = cfg.userId ? 'open_id' : 'chat_id';
+    const err = messages(resolveLocale(this.cfg.locale)).error;
     if (!receiveId) {
-      return { ok: false, error: 'feishu-notify: 缺少发送目标（userId/chatId）' };
+      return { ok: false, error: err.missingTarget };
     }
     try {
       const response = await client.im.message.create({
@@ -176,15 +178,15 @@ class SdkFeishuClient implements FeishuClient {
         },
       });
       if (response.code !== 0) {
-        return { ok: false, error: `飞书发送失败: ${response.msg ?? response.code}` };
+        return { ok: false, error: `${err.sendFailed}${response.msg ?? response.code}` };
       }
       const messageId = response.data?.message_id;
       if (!messageId) {
-        return { ok: false, error: '飞书发送成功但未返回 message_id' };
+        return { ok: false, error: err.noMessageId };
       }
       return { ok: true, messageId };
-    } catch (err) {
-      return { ok: false, error: `飞书发送异常: ${err instanceof Error ? err.message : String(err)}` };
+    } catch (e) {
+      return { ok: false, error: `${err.sendError}${e instanceof Error ? e.message : String(e)}` };
     }
   }
 
@@ -209,15 +211,16 @@ class SdkFeishuClient implements FeishuClient {
     opts: FeishuSendOptions = {},
   ): Promise<SendResult> {
     const to = resolveTarget(cfg);
+    const err = messages(resolveLocale(this.cfg.locale)).error;
     if (!to) {
-      return { ok: false, error: 'feishu-notify: 缺少发送目标（userId/chatId）' };
+      return { ok: false, error: err.missingTarget };
     }
     try {
       const channel = await this.ensureConnectedChannel();
       const result = await channel.send(to, { markdown }, opts);
       return { ok: true, messageId: result.messageId };
-    } catch (err) {
-      return { ok: false, error: `飞书发送异常: ${err instanceof Error ? err.message : String(err)}` };
+    } catch (e) {
+      return { ok: false, error: `${err.sendError}${e instanceof Error ? e.message : String(e)}` };
     }
   }
 
@@ -282,14 +285,14 @@ class SdkFeishuClient implements FeishuClient {
     this.ensureChannel();
     const ok = await waitFor(() => this.channel !== null && this.connected, 8000);
     if (!ok || !this.channel) {
-      throw new Error('飞书长连接未就绪');
+      throw new Error(messages(resolveLocale(this.cfg.locale)).error.channelNotReady);
     }
     return this.channel;
   }
 
   private getClient(): lark.Client {
     if (!this.cfg.appId || !this.cfg.appSecret) {
-      throw new FeishuConfigError('feishu-notify: 缺少 appId/appSecret 配置');
+      throw new FeishuConfigError(messages(resolveLocale(this.cfg.locale)).error.missingCredentials);
     }
     return new lark.Client({
       appId: this.cfg.appId,

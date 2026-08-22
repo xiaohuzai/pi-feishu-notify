@@ -1,7 +1,7 @@
-// 捕获你的 open_id：给机器人发一条消息，本脚本从长连接事件里抓取发送者 open_id。
-// 用法：npx tsx scripts/capture-openid.ts
-// 需要先配置 ~/.pi/agent/settings.json 的 feishu-notify 节（appId/appSecret）。
-// 然后到飞书里给机器人发任意一条消息（例如"你好"），脚本会打印你的 open_id。
+// Capture your open_id: send the bot a message, this script grabs the sender's open_id from the long-connection events.
+// Usage: npx tsx scripts/capture-openid.ts
+// Requires the feishu-notify section (appId/appSecret) in ~/.pi/agent/settings.json first.
+// Then send the bot any message in Feishu (e.g. "hello"); the script prints your open_id.
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadConfig } from '../src/config.js';
 import { resolveEnvVars } from '../src/config.js';
@@ -11,7 +11,7 @@ async function main() {
   const appId = resolveEnvVars(cfg.appId ?? '') as string;
   const appSecret = resolveEnvVars(cfg.appSecret ?? '') as string;
   if (!appId || !appSecret) {
-    console.error('未找到凭证：请先在 settings.json 配置 feishu-notify.appId / appSecret');
+    console.error('Credentials not found: configure feishu-notify.appId / appSecret in settings.json first');
     process.exit(1);
   }
 
@@ -23,16 +23,16 @@ async function main() {
     policy: { requireMention: false },
   });
 
-  console.log('🔌 长连接已启动，请在飞书里给机器人发送任意消息（例如"你好"）...');
-  console.log('（5 分钟内未收到消息会自动退出）');
+  console.log('🔌 Long connection started. Send the bot any message in Feishu (e.g. "hello")...');
+  console.log('(Exits automatically if no message arrives within 5 minutes)');
 
   const timeout = setTimeout(() => {
-    console.log('⏰ 超时未收到消息，退出。');
+    console.log('⏰ Timed out waiting for a message, exiting.');
     process.exit(1);
   }, 5 * 60 * 1000);
 
   channel.on('message', (msg) => {
-    console.log('收到消息:', JSON.stringify({
+    console.log('Message received:', JSON.stringify({
       messageId: msg.messageId,
       chatId: msg.chatId,
       chatType: msg.chatType,
@@ -41,20 +41,20 @@ async function main() {
       content: msg.content,
       replyToMessageId: msg.replyToMessageId,
     }, null, 2));
-    console.log('\n✅ 你的 open_id（userId 配置项）：');
+    console.log('\n✅ Your open_id (the userId setting):');
     console.log('   ' + msg.senderId);
-    console.log('\n✅ 如果你用的是群聊，chat_id（chatId 配置项）：');
+    console.log('\n✅ If you use a group chat, the chat_id (the chatId setting):');
     console.log('   ' + msg.chatId);
     clearTimeout(timeout);
     setTimeout(() => process.exit(0), 500);
   });
 
   channel.on('error', (err) => {
-    console.log('连接错误:', err.message);
+    console.log('Connection error:', err.message);
   });
 
   channel.connect().catch((err) => {
-    console.log('连接失败:', err.message ?? String(err));
+    console.log('Connection failed:', err.message ?? String(err));
     process.exit(1);
   });
 }

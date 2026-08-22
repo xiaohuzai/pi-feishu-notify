@@ -7,6 +7,7 @@
  */
 
 import type { FeishuNotifyConfig } from './types.js';
+import { resolveLocale, messages, type Locale } from './i18n.js';
 
 /** 从 assistant 消息的 content 数组里提取纯文本（跳过 thinking / toolCall）。 */
 export function extractAssistantText(content: unknown): string {
@@ -32,18 +33,20 @@ export interface NotificationMeta {
 export function buildNotificationMarkdown(
   meta: NotificationMeta,
   summary?: string,
+  locale: Locale = 'en',
 ): string {
+  const m = messages(locale);
   const lines = [
-    '## ✅ pi 主对话已完成',
+    `## ✅ ${m.notification.title}`,
     '',
-    `**项目**：${meta.project}`,
-    `**会话**：${meta.sid.slice(0, 8)}`,
-    `**时间**：${meta.time}`,
+    `**${m.notification.project}**：${meta.project}`,
+    `**${m.notification.session}**：${meta.sid.slice(0, 8)}`,
+    `**${m.notification.time}**：${meta.time}`,
   ];
   if (summary) {
     lines.push('', '---', '', summary);
   }
-  lines.push('', '> 回复本消息可继续指挥该会话');
+  lines.push('', `> ${m.notification.replyHint}`);
   return lines.join('\n');
 }
 
@@ -51,31 +54,35 @@ export function buildNotificationMarkdown(
 export function buildNotificationText(
   meta: NotificationMeta,
   summary?: string,
+  locale: Locale = 'en',
 ): string {
+  const m = messages(locale);
   const lines = [
-    '✅ pi 主对话已完成',
-    `项目: ${meta.project}`,
-    `会话: ${meta.sid.slice(0, 8)}`,
-    `时间: ${meta.time}`,
+    `✅ ${m.notification.title}`,
+    `${m.notification.project}: ${meta.project}`,
+    `${m.notification.session}: ${meta.sid.slice(0, 8)}`,
+    `${m.notification.time}: ${meta.time}`,
   ];
   if (summary) lines.push('', summary);
-  lines.push('', '回复本消息可继续指挥该会话。');
+  lines.push('', `${m.notification.replyHint}`);
   return lines.join('\n');
 }
 
 /**
  * 按配置选格式构建通知内容。
- * messageFormat 缺省视为 'markdown'（默认 markdown 美化）。
+ * messageFormat 缺省视为 'markdown'（默认 markdown 美化）；
+ * locale 缺省视为 auto（按 LANG 环境变量判断）。
  */
 export function buildNotification(
   cfg: FeishuNotifyConfig,
   meta: NotificationMeta,
   summary?: string,
 ): { format: 'markdown' | 'text'; content: string } {
+  const locale = resolveLocale(cfg.locale);
   if (cfg.messageFormat === 'text') {
-    return { format: 'text', content: buildNotificationText(meta, summary) };
+    return { format: 'text', content: buildNotificationText(meta, summary, locale) };
   }
-  return { format: 'markdown', content: buildNotificationMarkdown(meta, summary) };
+  return { format: 'markdown', content: buildNotificationMarkdown(meta, summary, locale) };
 }
 
 /**
