@@ -13,7 +13,8 @@
 - ✅ **Reply-and-inject**: reply to the notification in Feishu; your instruction is injected into the corresponding pi session to keep it going
 - ✅ **Bidirectional bridge**: pi → Feishu (notifications) / Feishu → pi (instructions)
 - ✅ **Markdown formatting**: notifications render as Feishu rich text (`post`) with clean titles, bold, code blocks, and quotes
-- ✅ **Streaming replies**: after you reply in Feishu to command pi, pi's response streams back to Feishu in real time with a typewriter effect (native card streaming)
+- ✅ **Final result only**: follow-up replies send only the filtered final result (markdown notification) — thinking/tool-call content never reaches Feishu
+- ✅ **Progress feedback**: long tasks refresh an elapsed-time progress line in place on the receipt, so you never wait blindly
 - ✅ **Cross-process dedup**: the same message is processed only once across multiple pi processes
 - ✅ **Crash self-healing**: automatically cleans up residual state from dead processes
 - ✅ **Flexible config**: global + project-level overrides, environment variable interpolation, auto-detect `userId`/`chatId`
@@ -40,7 +41,7 @@ pi install ./path/to/pi-feishu-notify
    - **Event subscription**: add the `Receive message im.message.receive_v1` event
    - **Permissions**:
      - `im:message`, `im:message:send_as_bot` (send messages) — required for markdown notifications
-     - `cardkit:card:write` (update card messages) — **required for streaming replies** (see below)
+     - `im:message` (update messages) — needed by the progress heartbeat to refresh the receipt in place
    - **Long connection**: set the event subscription mode to **Receive events via long connection** (SDK WebSocket mode — no public URL required)
 3. Get the app's **App ID** and **App Secret**, and add the bot as a contact (DM) or pull it into a group (group notifications).
 
@@ -67,7 +68,6 @@ Add to `~/.pi/agent/settings.json` (global) or project `.pi/settings.json` (proj
     "minDurationMs": 0,             // min task duration (ms); only notify when >= this value; 0/absent = no limit
     "logLevel": "normal",           // 'quiet'|'normal'|'verbose': log verbosity; normal no longer spams notification-sent
     "messageFormat": "markdown",    // notification/reply format: 'markdown' (default, Feishu rich text) | 'text' (plain)
-    "streamReplies": true,          // streaming replies: pi's reply streams back to Feishu with a typewriter effect (default on)
     "locale": "auto"                // 'auto' (default, detect via LANG) | 'en' (English) | 'zh' (中文)
   }
 }
@@ -133,12 +133,12 @@ Start pi after configuring (or `/reload`) — the extension activates automatica
       └────────────────┴── command injection
 ```
 
-- **Downstream**: `agent_settled` → sends a markdown rich-text notification (or a streaming card for follow-ups), gets the `message_id`, records `message_id → session` mapping in `~/.pi/agent/feishu-notify-router.json`
+- **Downstream**: `agent_settled` → sends a markdown rich-text notification, gets the `message_id`, records `message_id → session` mapping in `~/.pi/agent/feishu-notify-router.json`
 - **Upstream**: the SDK long connection receives a message → if `replyToMessageId` hits the routing table → cross-process dedup claim → `pi.sendUserMessage` injects the command
 - **Resident singleton**: the WebSocket consumer is a process-level singleton shared across sessions, and doesn't drop when sessions switch
 - **Dedup**: `~/.pi/agent/feishu-notify-dedup.json` records processed messages with cross-process mutual exclusion
 
-## Markdown formatting & streaming replies
+## Markdown formatting & reply behavior
 
 ### Notification markdown formatting (default)
 
@@ -160,24 +160,22 @@ Task-completion notifications are sent as Feishu rich text (`post` message + `md
 
 Set `messageFormat: "text"` to fall back to plain text.
 
-### Streaming replies (follow-up typewriter effect)
+### Reply behavior: final result only + progress feedback
 
-When you **reply to a notification** in Feishu to command pi to continue, pi's reply streams back to Feishu in real time with a typewriter effect:
+When you **reply to a notification** in Feishu to command pi to continue:
 
-1. You reply to the notification → you get a "received, processing…" receipt
-2. pi starts processing → a streaming card appears in Feishu, content typed out token by token (native card streaming animation)
-3. Done → the streaming card wraps up (closes the typewriter cursor); **no extra "completed" notification** (merged)
-4. You can keep replying to this streaming message to command again
+1. The reply is received → a "received your reply, processing…" receipt is sent immediately
+2. Long tasks → the receipt message is **updated in place** with "⏳ Still working… Ns elapsed" (every 15s by default, via `im.v1.message.update`), so you know the bot is alive and working — no blind waiting
+3. Done → the receipt updates to "✅ Done — see the result in the next message", then a **new markdown notification** is sent containing only the filtered **final result** (`lastAssistantText`: the last assistant message passed through `extractAssistantText`, which skips `thinking`/`toolCall` parts)
+4. You can reply to that final result message to keep commanding
 
-`streamReplies: false` disables streaming and falls back to "send one markdown notification after the task finishes".
+> **Why no live streaming**: streaming requires pushing `text_delta` token by token to Feishu; some providers emit reasoning/tool-calls as plain text deltas, so thinking and tool-call details leak out. That's why we only send the **settled final result** — consistent with initial task notifications, guaranteeing Feishu always sees a clean final answer.
 
-> Streaming applies only to **follow-ups** (you reply from Feishu to command). Initial tasks (started locally) still send one notification after finishing, to avoid spam.
-
-> **Streaming requires "card" capability**: streaming replies use Feishu **card streaming updates** (CardKit) under the hood — the app must enable the `cardkit:card:write` permission (not needed for plain markdown notifications, which are rich-text post messages). If the app **doesn't** have it, streaming startup fails and the extension **automatically falls back to a normal markdown notification** (logs `stream-start-failed`), without breaking functionality.
+> **Progress heartbeat needs the update-message permission**: refreshing the receipt uses `im.v1.message.update` (same `im:message` permission); if the app lacks it, progress refresh silently fails without affecting the receipt or the final result.
 
 ### Reply compatibility
 
-The SDK converts received rich-text (`post`) messages to plain text, so no matter whether you reply to a markdown notification, a streaming card, or a plain text message, the injected command is extracted correctly.
+The SDK converts received rich-text (`post`) messages to plain text, so no matter whether you reply to a markdown notification or a plain text message, the injected command is extracted correctly.
 
 ## Language (i18n)
 

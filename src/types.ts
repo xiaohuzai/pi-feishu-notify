@@ -52,12 +52,6 @@ export interface FeishuNotifyConfig {
    */
   messageFormat?: 'markdown' | 'text';
   /**
-   * 流式回复开关（默认 true）：
-   * 用户从飞书回复通知指挥 pi 继续时，把 pi 的回复以打字机效果流式推回飞书。
-   * 置 false 则回退为「任务完成后发一条 markdown 通知」。
-   */
-  streamReplies?: boolean;
-  /**
    * 界面语言：'auto'（默认，按 LANG 环境变量自动判断）| 'en'（英文）| 'zh'（中文）。
    * 影响飞书通知、回执、/feishu-notify 命令输出等用户可见文本。
    */

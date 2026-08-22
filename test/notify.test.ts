@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   extractAssistantText,
   extractReplyText,
+  stripThinkingMarkers,
   buildNotification,
   buildNotificationMarkdown,
   buildNotificationText,
@@ -116,5 +117,28 @@ describe('extractReplyText', () => {
 
   it('去除首尾空白', () => {
     expect(extractReplyText('  继续  ', 'text')).toBe('继续');
+  });
+});
+
+describe('stripThinkingMarkers（防御性思考内容清理）', () => {
+  it('普通文本原样返回', () => {
+    expect(stripThinkingMarkers('收到，正在处理')).toBe('收到，正在处理');
+  });
+
+  it('清理 <thinking> 标签包裹的思考', () => {
+    expect(stripThinkingMarkers('<thinking>我在思考</thinking>最终答案')).toBe('最终答案');
+  });
+
+  it('清理行首 ~~...~~ qwen 思考段', () => {
+    expect(stripThinkingMarkers('~~思考内容~~最终答案')).toBe('最终答案');
+  });
+
+  it('不误伤行中删除线 markdown', () => {
+    // 删除线不在行首，不应被清掉
+    expect(stripThinkingMarkers('结果 ~~已删除~~ 保留')).toContain('~~已删除~~');
+  });
+
+  it('空/空串安全返回', () => {
+    expect(stripThinkingMarkers('')).toBe('');
   });
 });

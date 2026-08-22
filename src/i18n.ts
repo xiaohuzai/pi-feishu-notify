@@ -31,6 +31,10 @@ export interface I18nMessages {
     sessionGone: string;
     /** 转达失败 */
     relayFailed: string;
+    /** 处理中进度（带已用时秒数） */
+    progress: string;
+    /** 处理完成，结果见下一条 */
+    done: string;
   };
   command: {
     description: string;
@@ -85,6 +89,8 @@ const en: I18nMessages = {
     received: 'Received your reply, processing…',
     sessionGone: 'This pi session has ended and can no longer receive commands. Please start a new task in a new session.',
     relayFailed: 'Failed to relay: ',
+    progress: '⏳ Still working… {{seconds}}s elapsed',
+    done: '✅ Done — see the result in the next message.',
   },
   command: {
     description: 'Send a notification to Feishu, or inspect extension status; off/on to mute, whoami to inspect detected IDs, bind to persist them',
@@ -138,6 +144,8 @@ const zh: I18nMessages = {
     received: '已收到你的回复，正在处理…',
     sessionGone: '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。',
     relayFailed: '转达失败：',
+    progress: '⏳ 仍在处理中，已用时 {{seconds}}s…',
+    done: '✅ 处理完成，结果见下一条消息。',
   },
   command: {
     description: '向飞书发送一条通知，或查看扩展状态；off/on 静音，whoami 查看识别到的 ID，bind 持久化',

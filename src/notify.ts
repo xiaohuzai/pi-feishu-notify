@@ -20,7 +20,25 @@ export function extractAssistantText(content: unknown): string {
       if (typeof text === 'string') parts.push(text);
     }
   }
-  return parts.join('\n').trim();
+  return stripThinkingMarkers(parts.join('\n').trim());
+}
+
+/**
+ * 防御性清理：某些 provider/配置下思考内容会以文本形式混进 text 增量
+ * （如 requiresThinkingAsText 把 thinking 转成 text 块，或 qwen 把思考包在
+ * `~~...~~` 里下发）。这里只清理几种明确的思考标记，避免误伤正常 markdown：
+ *  - `<thinking>...</thinking>`：
+ *  - 行首的 `~~...~~`（qwen 思考段，一般位于回答最前面）
+ *  - ````<thinking>...```` 代码块包裹的思考
+ */
+export function stripThinkingMarkers(text: string): string {
+  if (!text) return text;
+  let out = text;
+  // `<thinking>...</thinking>`（含多行）
+  out = out.replace(/<\s*thinking\s*>[\s\S]*?<\/\s*thinking\s*>/gi, '');
+  // qwen 行首 `~~...~~` 思考段（可能跨多行，直到不再以 ~~ 续行）
+  out = out.replace(/^~{2}[\s\S]*?~{2}\s*/m, '');
+  return out.trim();
 }
 
 export interface NotificationMeta {
