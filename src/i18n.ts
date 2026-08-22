@@ -89,7 +89,7 @@ const en: I18nMessages = {
     received: 'Received your reply, processing…',
     sessionGone: 'This pi session has ended and can no longer receive commands. Please start a new task in a new session.',
     relayFailed: 'Failed to relay: ',
-    progress: '⏳ Still working… {{seconds}}s elapsed',
+    progress: '⏳ Still working… {{seconds}}s elapsed — project: {{project}} / session: {{sid}}',
     done: '✅ Done — see the result in the next message.',
   },
   command: {
@@ -144,7 +144,7 @@ const zh: I18nMessages = {
     received: '已收到你的回复，正在处理…',
     sessionGone: '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。',
     relayFailed: '转达失败：',
-    progress: '⏳ 仍在处理中，已用时 {{seconds}}s…',
+    progress: '⏳ 仍在处理中，已用时 {{seconds}}s… 项目「{{project}}」/ 会话 {{sid}}',
     done: '✅ 处理完成，结果见下一条消息。',
   },
   command: {

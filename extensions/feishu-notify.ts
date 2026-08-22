@@ -97,13 +97,18 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   /** 进度刷新间隔（毫秒）。 */
   const PROGRESS_INTERVAL_MS = 15000;
 
-  /** 启动某 session 的进度心跳：定时在原回执消息上刷新已用时。 */
+  /** 启动某 session 的进度心跳：定时在原回执消息上刷新已用时 + 项目/会话信息。 */
   function startProgress(sid: string, msgId: string): void {
     const start = Date.now();
+    // 项目名：取 session cwd 的 basename（与通知里的「项目」一致）
+    const project = basename(sessionCwds.get(sid) ?? '') || '?';
     const timer = setInterval(() => {
       const seconds = Math.max(1, Math.round((Date.now() - start) / 1000));
-      void client?.updateText(msgId, format(messages(sessionLocale(sid)).receipt.progress, { seconds }))
-        .catch(() => undefined);
+      void client?.updateText(msgId, format(messages(sessionLocale(sid)).receipt.progress, {
+        seconds,
+        project,
+        sid: sid.slice(0, 8),
+      })).catch(() => undefined);
     }, PROGRESS_INTERVAL_MS);
     timer.unref?.();
     progress.set(sid, { msgId, timer, start });
