@@ -29,9 +29,6 @@
 # from npm (recommended — published on npmjs.org)
 pi install npm:pi-feishu-notify
 
-# or pin a specific version
-pi install npm:pi-feishu-notify@0.6.0
-
 # or via git
 pi install git:github.com/xiaohuzai/pi-feishu-notify
 
@@ -39,7 +36,7 @@ pi install git:github.com/xiaohuzai/pi-feishu-notify
 pi install ./path/to/pi-feishu-notify
 ```
 
-To update later: `pi update npm:pi-feishu-notify`, or `pi update --all` to update everything at once.
+To update later: `pi update npm:pi-feishu-notify`, or `pi update --all` to update everything at once. (You can pin a version by appending it to the package name, e.g. `npm:pi-feishu-notify@x.y.z` — pinned installs are skipped by `pi update`.)
 
 ## Prerequisites
 

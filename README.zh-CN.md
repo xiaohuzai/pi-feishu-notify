@@ -28,9 +28,6 @@
 # 通过 npm 安装（推荐，发布在 npmjs.org）
 pi install npm:pi-feishu-notify
 
-# 或固定某个版本
-pi install npm:pi-feishu-notify@0.6.0
-
 # 或通过 git 安装
 pi install git:github.com/xiaohuzai/pi-feishu-notify
 
@@ -38,7 +35,7 @@ pi install git:github.com/xiaohuzai/pi-feishu-notify
 pi install ./path/to/pi-feishu-notify
 ```
 
-后续更新：`pi update npm:pi-feishu-notify`，或用 `pi update --all` 一并更新。
+后续更新：`pi update npm:pi-feishu-notify`，或用 `pi update --all` 一并更新。（也可以在包名后追加版本号锁定版本，如 `npm:pi-feishu-notify@x.y.z` —— 锁定版本的安装不会被 `pi update` 更新。）
 
 ## 前置条件
 
