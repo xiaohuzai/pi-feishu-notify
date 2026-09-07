@@ -2,6 +2,9 @@
 
 > **Languages**: [English](README.md) · **简体中文**
 
+[![npm version](https://img.shields.io/npm/v/pi-feishu-notify.svg)](https://www.npmjs.com/package/pi-feishu-notify)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **pi 主对话 ⇄ 飞书双向桥**：pi 任务完成时推送飞书通知，在飞书里**回复通知**即可远程指挥对应 pi 会话继续执行。
 
 **不依赖 `lark-cli`** —— 基于官方 `@larksuiteoapi/node-sdk` 的 WebSocket 长连接直连飞书，无需安装任何额外 CLI 工具，也无需公网回调。
@@ -22,7 +25,7 @@
 ## 安装
 
 ```bash
-# 通过 npm 安装（发布到 pi.dev/packages 社区目录）
+# 通过 npm 安装（推荐，发布在 npmjs.org）
 pi install npm:pi-feishu-notify
 
 # 或通过 git 安装
@@ -31,6 +34,8 @@ pi install git:github.com/xiaohuzai/pi-feishu-notify
 # 或本地路径
 pi install ./path/to/pi-feishu-notify
 ```
+
+后续更新：`pi update npm:pi-feishu-notify`，或用 `pi update --all` 一并更新。（也可以在包名后追加版本号锁定版本，如 `npm:pi-feishu-notify@x.y.z` —— 锁定版本的安装不会被 `pi update` 更新。）
 
 ## 前置条件
 

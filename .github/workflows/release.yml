@@ -86,3 +86,17 @@ jobs:
           gh pr create --base main --head "$RELEASE_BRANCH" \
             --title "chore: release v${{ steps.check.outputs.version }}" \
             --body "Created automatically by the Release workflow: updates package.json / package-lock.json versions. Please review and merge." || echo "PR creation failed or already exists, please check manually"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 基于刚 push 的 tag 建 Release，changelog 自动生成；重复运行时跳过已存在的 Release
+          VERSION=${{ steps.check.outputs.version }}
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "Release v$VERSION already exists, skipping"
+            exit 0
+          fi
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes
