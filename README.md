@@ -2,6 +2,9 @@
 
 > **Languages**: **English** · [简体中文](README.zh-CN.md)
 
+[![npm version](https://img.shields.io/npm/v/pi-feishu-notify.svg)](https://www.npmjs.com/package/pi-feishu-notify)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **Bidirectional bridge between pi main conversations and Feishu (Lark)**: when a pi task finishes, a notification is pushed to Feishu — and you can **reply to the notification in Feishu** to remotely command that pi session to continue.
 
 **No `lark-cli` dependency** — it connects directly to Feishu over the official `@larksuiteoapi/node-sdk` WebSocket long connection. No extra CLI tools, no public callback URL needed.
@@ -23,8 +26,11 @@
 ## Install
 
 ```bash
-# via npm (published in the pi.dev/packages community directory)
+# from npm (recommended — published on npmjs.org)
 pi install npm:pi-feishu-notify
+
+# or pin a specific version
+pi install npm:pi-feishu-notify@0.6.0
 
 # or via git
 pi install git:github.com/xiaohuzai/pi-feishu-notify
@@ -32,6 +38,8 @@ pi install git:github.com/xiaohuzai/pi-feishu-notify
 # or a local path
 pi install ./path/to/pi-feishu-notify
 ```
+
+To update later: `pi update npm:pi-feishu-notify`, or `pi update --all` to update everything at once.
 
 ## Prerequisites
 
