@@ -64,12 +64,14 @@ Add to `~/.pi/agent/settings.json` (global) or project `.pi/settings.json` (proj
     "enabled": true,
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
+    "domain": "feishu",             // 'feishu' (default, China) | 'lark' (international)
     "replyEnabled": true,           // whether to allow reply-and-inject
     "receipt": true,                // send a "received" receipt after relaying
     "requireMention": false,        // in groups, whether @bot is required
     "allowedSenderIds": [],         // DM whitelist (open_id list); empty = only handle p2p DMs
     "allowedChatIds": [],           // group whitelist (chat_id list); empty = still allow the "notification target chatId" and "auto-detected groups"
-    "includeSummary": true,
+    "includeSummary": true,         // include the session summary in notifications (default true)
+    "staleDays": 7,                 // days to keep stale state (session history / notification routes)
     "minDurationMs": 0,             // min task duration (ms); only notify when >= this value; 0/absent = no limit
     "logLevel": "normal",           // 'quiet'|'normal'|'verbose': log verbosity; normal no longer spams notification-sent
     "messageFormat": "markdown",    // notification/reply format: 'markdown' (default, Feishu rich text) | 'text' (plain)
@@ -91,7 +93,7 @@ Add to `~/.pi/agent/settings.json` (global) or project `.pi/settings.json` (proj
 
 Once detected:
 
-- **Automatic fallback**: if `userId` isn't set in settings, notifications go to the just-detected DM user automatically (first time it hints you can persist with `/feishu-notify bind`).
+- **Automatic fallback**: if neither `userId` nor `chatId` is set in settings, notifications go to the just-detected DM user automatically (first time it hints you can persist with `/feishu-notify bind`). If you have configured a target (`userId` or `chatId`), it is always used as-is — auto-detected values never override it.
 - **`/feishu-notify whoami`**: view the currently detected `userId` / `chatId` (usually unneeded; use it for troubleshooting or to lock targets manually).
 - **`/feishu-notify bind`**: write the detected values into project `.pi/settings.json` (only fills missing fields, never overwrites existing config); takes effect after restart or `/reload`.
 - **Survives restarts**: detection results are stored in `~/.pi/agent/feishu-notify-discovered.json`. On next startup, if `userId` isn't configured but was detected before, pi shows a one-time hint to use `/feishu-notify bind`.

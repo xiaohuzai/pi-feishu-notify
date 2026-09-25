@@ -64,12 +64,14 @@ pi install ./path/to/pi-feishu-notify
     "enabled": true,
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
+    "domain": "feishu",             // 'feishu'（默认，国内）| 'lark'（国际版）
     "replyEnabled": true,           // 是否允许回复回注
     "receipt": true,                // 转达后回执一条"已收到"
     "requireMention": false,        // 群聊时是否要求 @ 机器人
     "allowedSenderIds": [],         // 私聊白名单（open_id 列表），不填则只处理 p2p 单聊
     "allowedChatIds": [],           // 群聊白名单（chat_id 列表）；不填时仍会放行"通知目标 chatId"与"自动识别过的群"里的回复
-    "includeSummary": true,
+    "includeSummary": true,         // 通知中包含会话摘要（默认 true）
+    "staleDays": 7,                 // 残留状态（会话历史/通知路由）保留天数
     "minDurationMs": 0,             // 任务最短时长（毫秒），>= 该值才发通知；0/缺省=不限制
     "logLevel": "normal",           // 'quiet'|'normal'|'verbose'：日志详细度，normal 默认不再刷 notification-sent
     "messageFormat": "markdown",    // 通知/回复格式：'markdown'（默认，飞书富文本）| 'text'（纯文本）
@@ -90,7 +92,7 @@ pi install ./path/to/pi-feishu-notify
 
 识别到后：
 
-- **自动回退生效**：如果 settings 里没配 `userId`，通知会自动发到刚识别出来的私聊用户（首次会自动提示可用 `/feishu-notify bind` 持久化）。
+- **自动回退生效**：如果 settings 里 `userId` / `chatId` 都没配，通知会自动发到刚识别出来的私聊用户（首次会自动提示可用 `/feishu-notify bind` 持久化）。只要配置了发送目标（`userId` 或 `chatId`），就始终按配置发送，自动识别值不会覆盖它。
 - **`/feishu-notify whoami`**：查看当前已识别的 `userId` / `chatId`（一般不需要，排查或想手动锁定目标时用）。
 - **`/feishu-notify bind`**：把识别到的值自动写入项目 `.pi/settings.json`（只补写缺失字段，不覆盖已有配置），重启或 `/reload` 后固定生效。
 - **重启也能记住**：识别结果会存到 `~/.pi/agent/feishu-notify-discovered.json`。下次启动时若 settings 仍未配置 `userId` 但已识别过，pi 里会弹一条一次性提示，提醒你用 `/feishu-notify bind` 一键写入。

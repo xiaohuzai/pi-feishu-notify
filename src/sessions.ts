@@ -1,15 +1,18 @@
 /**
  * pi-feishu-notify — 会话注册表
  *
- * 记录当前活跃的 pi session（pid + cwd + 启动时间），用于：
- *  - 崩溃自愈：清理已死进程残留的孤儿记录
- *  - 诊断：/feishu-notify status 展示当前注册的 session
+ * 记录 pi session（pid + cwd + 启动时间），用于：
+ *  - stale 回注：pi 重启后 session id 会变，回复旧通知时按记录里的 cwd
+ *    与当前项目比对，同项目则回退注入到当前会话。因此**历史记录（含已退出
+ *    进程的）必须保留**，只按 staleDays 做过期清理，不能按 pid 死活即删。
+ *  - 诊断：/feishu-notify status 展示当前存活的 session（alive 自动剔除死进程）
  *
  * 注意：SDK 长连接在 pi 进程内，进程退出 WebSocket 自然断开，无需像
  * lark-cli 子进程那样回收孤儿 consumer；这里主要做状态记账与清理。
  */
 import { join } from 'node:path';
 import { stateDir, mutateJson, readJson, pidAlive } from './state.js';
+import { retentionMs } from './router.js';
 import type { SessionEntry } from './types.js';
 
 export type SessionMap = Record<string, SessionEntry>;
@@ -24,20 +27,26 @@ function sessionsLockDir(): string {
 }
 
 export class SessionRegistry {
-  /** 注册一个 session（崩溃清理：顺带移除死进程的孤儿记录）。 */
-  register(sid: string, cwd: string): void {
+  /**
+   * 注册一个 session。历史记录按保留天数清理（默认 7 天）；
+   * 同 sid 重复注册覆盖为最新（pid/cwd/startedAt）。
+   */
+  register(sid: string, cwd: string, retentionDays?: number): void {
     if (!sid) return;
+    const maxAgeMs = retentionMs(retentionDays);
     mutateJson<SessionMap>(
       sessionsFile(),
       sessionsLockDir(),
       () => ({ ...DEFAULT_SESSIONS }),
       (map) => {
         for (const k of Object.keys(map)) {
-          if (!map[k]) continue;
-          if (map[k]!.pid === process.pid && k !== sid) {
-            // 同进程旧记录
+          const e = map[k];
+          if (!e) {
+            delete map[k];
+            continue;
           }
-          if (!pidAlive(map[k]!.pid)) delete map[k];
+          const started = Date.parse(e.startedAt);
+          if (Number.isFinite(started) && Date.now() - started > maxAgeMs) delete map[k];
         }
         map[sid] = { pid: process.pid, cwd, startedAt: new Date().toISOString() };
       },

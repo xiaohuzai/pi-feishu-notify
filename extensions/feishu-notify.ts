@@ -29,6 +29,19 @@ import type { FeishuMessage, FeishuNotifyConfig } from '../src/types.js';
 
 /** 记录收到消息的去重集合（进程内，避免 SDK 自身 dedup 外的重复触发）。 */
 const seenMessages = new Set<string>();
+/** 去重集合上限（FIFO 淘汰，避免长驻进程无界增长）。 */
+const SEEN_MESSAGES_MAX = 5000;
+
+/** 标记消息已处理；返回 false 表示此前已见过。 */
+function markSeen(messageId: string): boolean {
+  if (seenMessages.has(messageId)) return false;
+  seenMessages.add(messageId);
+  if (seenMessages.size > SEEN_MESSAGES_MAX) {
+    const oldest = seenMessages.values().next().value;
+    if (oldest !== undefined) seenMessages.delete(oldest);
+  }
+  return true;
+}
 
 /**
  * 统一的日志输出（全部走 stderr，避免污染 stdout 协议）。
@@ -62,7 +75,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   const muted = new Set<string>();
   // 自动识别的发送目标：用户在飞书给机器人发过消息后，这里会记录
   //  - discoveredUserId：最近一条 p2p 私聊的 senderId（open_id）
-  //  - discoveredChatIds：收到过消息的 chatId → senderId 映射
+  //  - discoveredChatIds：收到过消息的群 chatId → senderId 映射
   // 同时持久化到 ~/.pi/agent/feishu-notify-discovered.json，重启后仍能提示绑定
   let discoveredUserId: string | undefined;
   const discoveredChatIds = new Map<string, string>();
@@ -82,8 +95,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   const logs = new Map<string, (event: string, data?: Record<string, unknown>, severity?: string) => void>();
   // 全局日志器（无 session 上下文时用，如 SDK 连接日志）
   const log = makeLog({});
-  // 最近一次 agent 回复文本（agent_end 时更新，agent_settled 时发送）
-  let lastAssistantText = '';
+  // 最近一次 agent 回复文本，按 sid 记录（agent_end 时更新，agent_settled 时发送）
+  const lastAssistantTexts = new Map<string, string>();
 
   // ── 进度心跳状态（follow-up 回注后）──
   // 回注后发一条「已收到」回执，长任务期间用 updateText 在原地刷新已用时，
@@ -99,6 +112,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
 
   /** 启动某 session 的进度心跳：定时在原回执消息上刷新已用时 + 项目/会话信息。 */
   function startProgress(sid: string, msgId: string): void {
+    stopProgress(sid); // 同一 session 再次回注时先停掉旧心跳，避免定时器泄漏
     const start = Date.now();
     // 项目名：取 session cwd 的 basename（与通知里的「项目」一致）
     const project = basename(sessionCwds.get(sid) ?? '') || '?';
@@ -114,16 +128,19 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     progress.set(sid, { msgId, timer, start });
   }
 
-  /** 停止心跳；done=true 时把回执消息更新为「处理完成，结果见下一条」。 */
-  function stopProgress(sid: string, done = false): void {
+  /**
+   * 停止心跳。传 finalText 时把回执消息原地更新为该文案；
+   * 返回是否找到（并停掉）进行中的心跳。
+   */
+  function stopProgress(sid: string, finalText?: string): boolean {
     const p = progress.get(sid);
-    if (!p) return;
+    if (!p) return false;
     clearInterval(p.timer);
     progress.delete(sid);
-    if (done) {
-      void client?.updateText(p.msgId, messages(sessionLocale(sid)).receipt.done)
-        .catch(() => undefined);
+    if (finalText) {
+      void client?.updateText(p.msgId, finalText).catch(() => undefined);
     }
+    return true;
   }
 
   /** 获取当前 session 的 sid + 是否允许发送。 */
@@ -149,24 +166,28 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     if (client) return;
     client = getFeishuClient(cfg, makeLog(cfg));
     client.subscribe((msg) => {
-      void handleIncoming(msg);
+      void handleIncoming(msg).catch((err) => {
+        log('reply-handle-failed', { error: err instanceof Error ? err.message : String(err) }, 'ERROR');
+      });
     });
   }
 
   /** 处理一条上行飞书消息（回复通知 → 回注 session）。 */
   async function handleIncoming(msg: FeishuMessage): Promise<void> {
-    if (seenMessages.has(msg.messageId)) return;
-    seenMessages.add(msg.messageId);
+    if (!markSeen(msg.messageId)) return;
 
-    // 自动识别发送目标：只要收到消息就记录，供未配置 userId/chatId 时回填
-    if (msg.chatType === 'p2p' && msg.senderId) {
+    // 自动识别发送目标：只要收到消息就记录，供未配置 userId/chatId 时回填。
+    // 只把群聊 chatId 记入「已识别群聊」——p2p 的 chatId 混进去会污染 whoami/bind
+    // （bind 可能把单聊 chat_id 当成群 chatId 写进配置）。
+    const isP2p = msg.chatType === 'p2p';
+    if (isP2p && msg.senderId) {
       discoveredUserId = msg.senderId;
     }
-    if (msg.chatId && msg.senderId) {
+    if (!isP2p && msg.chatId && msg.senderId) {
       discoveredChatIds.set(msg.chatId, msg.senderId);
     }
     // 持久化识别结果（供下次启动提示 /feishu-notify bind）
-    recordDiscovered(msg.chatType === 'p2p' ? msg.senderId : undefined, msg.chatId);
+    recordDiscovered(isP2p ? msg.senderId : undefined, isP2p ? undefined : msg.chatId);
 
     // 找到这条消息对应的配置（按 chatId/senderId 归属）
     const cfg = configForMessage(msg) ?? {};
@@ -189,13 +210,19 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     router.remove(msg.replyToMessageId ?? '');
   }
 
-  /** 反查一条消息属于哪个配置（用于会话绑定多个配置的场景）。 */
+  /**
+   * 反查一条消息属于哪个配置（多会话/多配置并存时按 chatId/senderId 精确匹配，
+   * 匹配不到再回退到第一个配置）。不要求 canSend：allowedSenderIds 等过滤规则
+   * 在未配发送目标的纯自动模式下也必须生效。
+   */
   function configForMessage(msg: FeishuMessage): FeishuNotifyConfig | undefined {
-    // 简单场景：取最近注册的配置；多配置场景暂取第一个启用的
+    let fallback: FeishuNotifyConfig | undefined;
     for (const cfg of configs.values()) {
-      if (canSend(cfg)) return cfg;
+      if (cfg.chatId && cfg.chatId === msg.chatId) return cfg;
+      if (cfg.userId && cfg.userId === msg.senderId) return cfg;
+      fallback ??= cfg;
     }
-    return undefined;
+    return fallback;
   }
 
   /**
@@ -207,9 +234,10 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
    *     只能作用于当前激活会话）；
    *  - 否则（项目也对不上）才发"会话已结束"回执。
    *
-   * 流程：先发「已收到」回执并启动进度心跳（在 sendUserMessage 之前，保证空闲场景
-   * 也能立即给飞书反馈），再阻塞等待 agent 运行；agent_end 记录最终文本、
-   * agent_settled 停掉心跳并发送最终 markdown 结果。
+   * 流程：先发「已收到」回执并启动进度心跳（在 sendUserMessage 之前，保证用户
+   * 立即得到飞书反馈）；agent_end 记录最终文本、agent_settled 停掉心跳并发送
+   * 最终 markdown 结果。注意 pi.sendUserMessage 是 fire-and-forget（包装层不返回
+   * Promise），这里的 try/catch 只能捕获同步抛出的错误（如 session 已失效）。
    */
   async function injectReply(sid: string, text: string, msg: FeishuMessage): Promise<void> {
     // 目标 session 不在当前进程 → 判断是否同项目可回退到当前会话
@@ -230,7 +258,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       `[feishu-notify] ${format(t.inject.prompt, {
         name: msg.senderName ? ` 「${msg.senderName}」` : '',
       })}${text}`;
-    // 先发回执 + 启动进度心跳（必须在 sendUserMessage 之前：空闲时它会阻塞到整轮结束）
+    // 先发回执 + 启动进度心跳（必须在 sendUserMessage 之前）
     const msgId = await sendReceipt(sid, `${t.receipt.received}（${text}）`);
     if (msgId) startProgress(sid, msgId);
     try {
@@ -238,10 +266,13 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     } catch (err) {
       // print 模式（-p）收尾时 session 可能已关闭导致 ctx stale，
       // 此时回注失败不影响通知/路由，仅记日志 + 回执告知用户即可。
-      stopProgress(sid);
       const msg_ = err instanceof Error ? err.message : String(err);
       sessionLog(sid)('inject-failed', { error: msg_ }, 'WARN');
-      void sendReceipt(sid, `${t.receipt.relayFailed}${msg_}`);
+      const failed = `${t.receipt.relayFailed}${msg_}`;
+      // 优先把失败信息原地刷在回执上；没有回执（未生成/未启用）才另发一条
+      if (!stopProgress(sid, failed)) {
+        void sendReceipt(sid, failed);
+      }
     }
   }
 
@@ -263,25 +294,30 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   }
 
   /**
-   * 解析发送目标：优先用配置里的 userId/chatId；未配置 userId 时回退到自动识别值
-   * （用户在飞书给机器人发过私聊消息后自动捕获的 open_id）。
-   * 回退仅用于 userId（私聊方向明确）；chatId 不做自动回退（群聊可能多个，容易发错）。
+   * 解析发送目标：
+   *  - 配置了 userId/chatId 任一 → 用配置值（已锁定目标，不再被自动识别值劫持：
+   *    否则只配了群 chatId 的用户会把通知发进某个曾私聊过 bot 的单聊）
+   *  - 两者都未配置 → 回退到自动识别的 open_id（私聊方向明确；chatId 不做自动
+   *    回退，群聊可能多个，容易发错）
    * 首次回退时输出一条可见日志，提示可用 /feishu-notify bind 持久化。
    */
   function resolveSendTarget(
     cfg: FeishuNotifyConfig,
     logc: (event: string, data?: Record<string, unknown>, severity?: string) => void,
   ): { userId?: string; chatId?: string } {
-    const userId = cfg.userId ?? discoveredUserId;
-    if (!cfg.userId && discoveredUserId && !warnedAutoTarget) {
+    if (cfg.userId || cfg.chatId) {
+      return { userId: cfg.userId, chatId: cfg.chatId };
+    }
+    const userId = discoveredUserId;
+    if (userId && !warnedAutoTarget) {
       warnedAutoTarget = true;
       logc(
         'auto-target',
-        { userId: discoveredUserId, hint: messages(resolveLocale(cfg.locale)).hint.autoTarget },
+        { userId, hint: messages(resolveLocale(cfg.locale)).hint.autoTarget },
         'WARN',
       );
     }
-    return { userId, chatId: cfg.chatId };
+    return { userId };
   }
 
   /** 该 session 本次任务是否应发通知（静音/时长过滤）。 */
@@ -313,7 +349,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     configs.set(sid, cfg);
     sessionCwds.set(sid, ctx.cwd);
     logs.set(sid, makeLog(cfg));
-    registry.register(sid, ctx.cwd);
+    registry.register(sid, ctx.cwd, cfg.staleDays);
     sessionLog(sid)('session-start', { sid });
 
     // 启动一次性提示：settings 未配 userId，但已自动识别过 → 提醒一键持久化
@@ -344,18 +380,19 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     const sid = ctx.sessionManager.getSessionId();
     taskStarts.set(sid, Date.now());
     // 新任务开始时，重置上一条摘要（避免误用旧回复）
-    lastAssistantText = '';
+    lastAssistantTexts.delete(sid);
   });
 
   pi.on('agent_end', async (_event, ctx) => {
     // 记录最近一次 assistant 文本，供 agent_settled 发通知用
+    const sid = ctx.sessionManager.getSessionId();
     const branch = ctx.sessionManager.getBranch();
     for (let i = branch.length - 1; i >= 0; i--) {
       const entry = branch[i];
       if (entry?.type === 'message' && entry.message.role === 'assistant') {
         const text = extractAssistantText(entry.message.content);
         if (text) {
-          lastAssistantText = text;
+          lastAssistantTexts.set(sid, text);
           break;
         }
       }
@@ -369,15 +406,15 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     // 只在空闲时通知（避免 stream 中打扰）
     if (!ctx.isIdle()) return;
 
-    // 停掉 follow-up 的进度心跳（若有），并给回执打个「已完成」收尾
-    stopProgress(sid, true);
-
     // 静音 / 时长过滤
-    if (!shouldNotify(sid, cfg)) {
-      taskStarts.delete(sid);
-      return;
-    }
+    const willNotify = shouldNotify(sid, cfg);
     taskStarts.delete(sid);
+
+    // 停掉 follow-up 的进度心跳（若有）；只在后面真有一条结果消息时才提示
+    // 「结果见下一条」，否则（静音/时长过滤）只回「处理完成」
+    const t = messages(sessionLocale(sid));
+    stopProgress(sid, willNotify ? t.receipt.done : t.receipt.doneOnly);
+    if (!willNotify) return;
 
     // 发一条 markdown（或 text）通知：只含过滤后的最终结果文字
     const project = basename(ctx.cwd) || ctx.cwd;
@@ -386,14 +423,20 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       { hour12: false },
     );
     const meta: NotificationMeta = { project, sid, time };
-    const { format, content } = buildNotification(cfg, meta, lastAssistantText || undefined);
+    const { format: msgFormat, content } = buildNotification(
+      cfg,
+      meta,
+      lastAssistantTexts.get(sid) || undefined,
+    );
+    lastAssistantTexts.delete(sid);
+    ensureSubscribed(cfg);
     const target = resolveSendTarget(cfg, sessionLog(sid));
-    const send = format === 'text'
+    const send = msgFormat === 'text'
       ? client?.sendText(content, target)
       : client?.sendMarkdown(content, target);
     void send?.then((r) => {
       if (r.ok && r.messageId) {
-        router.record(r.messageId, sid);
+        router.record(r.messageId, sid, cfg.staleDays);
         // 成功通知仅 verbose 时输出，避免刷屏
         sessionLog(sid)('notification-sent', { sid, messageId: r.messageId });
       } else {
@@ -408,8 +451,10 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     sessionCwds.delete(sid);
     logs.delete(sid);
     taskStarts.delete(sid);
+    lastAssistantTexts.delete(sid);
     muted.delete(sid);
-    registry.unregister(sid);
+    // 不 registry.unregister：保留 sid → cwd 历史记录，重启后回复旧通知时
+    // 依赖它做「同项目回退注入」；过期记录由 register 按 staleDays 清理
     // 清理进度心跳，避免残留定时器
     stopProgress(sid);
     if (currentSid === sid) currentSid = undefined;
@@ -465,7 +510,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         if (result.ok) {
           const written = result.written?.join(', ') ?? '';
           ctx.ui.notify(format(t.bindWritten, { fields: written }), 'info');
-          logc('bound', { ...result.written }, 'INFO');
+          logc('bound', { fields: result.written }, 'INFO');
         } else {
           ctx.ui.notify(`${t.bindFailed}${result.error}`, 'error');
         }
@@ -495,22 +540,18 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(t.notConfigured, 'warning');
         return;
       }
+      ensureSubscribed(cfg);
       const target = resolveSendTarget(cfg, logc);
       const send = cfg.messageFormat === 'text'
         ? client?.sendText(args.trim(), target)
         : client?.sendMarkdown(args.trim(), target);
       const r = await send;
       if (r?.ok) {
-        if (r.messageId) router.record(r.messageId, sid);
+        if (r.messageId) router.record(r.messageId, sid, cfg.staleDays);
         ctx.ui.notify(t.sent, 'info');
       } else {
         ctx.ui.notify(`${t.sendFailed}${r?.error}`, 'error');
       }
     },
-  });
-
-  // 退出清理
-  process.on('beforeExit', () => {
-    for (const [sid] of configs) registry.unregister(sid);
   });
 }

@@ -35,6 +35,8 @@ export interface I18nMessages {
     progress: string;
     /** 处理完成，结果见下一条 */
     done: string;
+    /** 处理完成（后面没有结果消息时用，如静音/时长过滤） */
+    doneOnly: string;
   };
   command: {
     description: string;
@@ -91,6 +93,7 @@ const en: I18nMessages = {
     relayFailed: 'Failed to relay: ',
     progress: '⏳ Still working… {{seconds}}s elapsed — project: {{project}} / session: {{sid}}',
     done: '✅ Done — see the result in the next message.',
+    doneOnly: '✅ Done.',
   },
   command: {
     description: 'Send a notification to Feishu, or inspect extension status; off/on to mute, whoami to inspect detected IDs, bind to persist them',
@@ -146,6 +149,7 @@ const zh: I18nMessages = {
     relayFailed: '转达失败：',
     progress: '⏳ 仍在处理中，已用时 {{seconds}}s… 项目「{{project}}」/ 会话 {{sid}}',
     done: '✅ 处理完成，结果见下一条消息。',
+    doneOnly: '✅ 处理完成。',
   },
   command: {
     description: '向飞书发送一条通知，或查看扩展状态；off/on 静音，whoami 查看识别到的 ID，bind 持久化',
