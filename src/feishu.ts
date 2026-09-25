@@ -16,8 +16,12 @@ import type {
   SendResult,
 } from './types.js';
 import { resolveLocale, messages } from './i18n.js';
+import { unwrapTextShell } from './notify.js';
 
 const CLIENT_KEY = Symbol.for('pi-feishu-notify.client');
+
+/** WebSocket 握手超时（毫秒）。SDK 默认不设超时，卡死的握手会永久占住连接流程。 */
+const HANDSHAKE_TIMEOUT_MS = 15000;
 
 /** 校验错误：appId/appSecret 缺失 */
 export class FeishuConfigError extends Error {
@@ -59,27 +63,41 @@ function resolveDomain(value: unknown): lark.Domain | string | undefined {
 }
 
 function resolveLoggerLevel(value: unknown): lark.LoggerLevel {
-  if (value === 'debug') return lark.LoggerLevel.debug;
-  if (value === 'info') return lark.LoggerLevel.info;
-  if (value === 'warn') return lark.LoggerLevel.warn;
-  if (value === 'trace') return lark.LoggerLevel.trace;
-  return lark.LoggerLevel.error;
+  // 扩展自身的 logLevel → SDK 日志级别（quiet 少、normal 默认、verbose 排障）
+  if (value === 'quiet') return lark.LoggerLevel.error;
+  if (value === 'verbose') return lark.LoggerLevel.info;
+  return lark.LoggerLevel.warn;
 }
 
-function normalizeTextContent(content: string): string {
-  // 只对「看起来是 JSON」的 content 做解析（text 消息 content 是 {"text":"..."}）；
-  // SDK 对 post 消息已转成纯文本，纯文本即使是合法 JSON（如 "123"）也不该被误拆。
-  const trimmed = content.trim();
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-    try {
-      const parsed = JSON.parse(content) as { text?: unknown };
-      return typeof parsed.text === 'string' ? parsed.text : '';
-    } catch {
-      // fallthrough → 原样返回
-    }
-  }
-  return content;
+/**
+ * SDK 内部日志统一写 stderr。
+ * SDK 自带的 defaultLogger 用 console.log 输出 error 级日志——会污染 stdout，
+ * 干扰 pi 的 TUI 协议，必须替换掉。
+ */
+function makeSdkLogger(): lark.Logger {
+  const write = (level: string, msg: unknown[]): void => {
+    const text = msg
+      .map((m) => {
+        if (typeof m === 'string') return m;
+        try {
+          return JSON.stringify(m);
+        } catch {
+          return String(m);
+        }
+      })
+      .join(' ');
+    process.stderr.write(`[feishu-sdk:${level}] ${text}\n`);
+  };
+  return {
+    error: (...msg: unknown[]) => write('error', msg),
+    warn: (...msg: unknown[]) => write('warn', msg),
+    info: (...msg: unknown[]) => write('info', msg),
+    debug: (...msg: unknown[]) => write('debug', msg),
+    trace: (...msg: unknown[]) => write('trace', msg),
+  };
 }
+
+const sdkLogger = makeSdkLogger();
 
 /** 解析发送目标为 SDK 的 to 字符串（userId 优先，其次 chatId）。 */
 function resolveTarget(cfg: FeishuTarget): string {
@@ -104,7 +122,7 @@ function toFeishuMessage(msg: lark.NormalizedMessage): FeishuMessage {
     chatType: msg.chatType,
     senderId: msg.senderId,
     senderName: msg.senderName,
-    content: normalizeTextContent(msg.content),
+    content: unwrapTextShell(msg.content),
     rawContentType: msg.rawContentType,
     mentionedBot: msg.mentionedBot,
     mentionAll: msg.mentionAll,
@@ -140,10 +158,13 @@ class SdkFeishuClient implements FeishuClient {
     text: string,
     cfg: { userId?: string; chatId?: string },
   ): Promise<SendResult> {
+    const err = messages(resolveLocale(this.cfg.locale)).error;
+    if (!this.cfg.appId || !this.cfg.appSecret) {
+      return { ok: false, error: err.missingCredentials };
+    }
     const client = this.getClient();
     const receiveId = cfg.userId ?? cfg.chatId;
     const receiveIdType = cfg.userId ? 'open_id' : 'chat_id';
-    const err = messages(resolveLocale(this.cfg.locale)).error;
     if (!receiveId) {
       return { ok: false, error: err.missingTarget };
     }
@@ -228,18 +249,24 @@ class SdkFeishuClient implements FeishuClient {
     return this.channel;
   }
 
+  /** REST 客户端（懒创建并缓存：复用 token 缓存，避免每条消息新建 Client）。 */
+  private restClient: lark.Client | null = null;
+
   private getClient(): lark.Client {
     if (!this.cfg.appId || !this.cfg.appSecret) {
       throw new FeishuConfigError(messages(resolveLocale(this.cfg.locale)).error.missingCredentials);
     }
-    return new lark.Client({
+    if (this.restClient) return this.restClient;
+    const domain = resolveDomain(this.cfg.domain);
+    this.restClient = new lark.Client({
       appId: this.cfg.appId,
       appSecret: this.cfg.appSecret,
       source: 'pi-feishu-notify',
-      ...(resolveDomain(this.cfg.domain) !== undefined
-        ? { domain: resolveDomain(this.cfg.domain) }
-        : {}),
+      logger: sdkLogger,
+      loggerLevel: resolveLoggerLevel(this.cfg.logLevel),
+      ...(domain !== undefined ? { domain } : {}),
     });
+    return this.restClient;
   }
 
   private ensureChannel(): void {
@@ -251,19 +278,22 @@ class SdkFeishuClient implements FeishuClient {
       return;
     }
 
+    const domain = resolveDomain(this.cfg.domain);
     const channel = lark.createLarkChannel({
       appId: this.cfg.appId,
       appSecret: this.cfg.appSecret,
       transport: 'websocket',
-      loggerLevel: resolveLoggerLevel(this.cfg.domain),
+      ...(domain !== undefined ? { domain } : {}),
+      loggerLevel: resolveLoggerLevel(this.cfg.logLevel),
+      logger: sdkLogger,
       source: 'pi-feishu-notify',
-      // 回复通知回注场景：不要求 @ 机器人，自己按 sender/chat 白名单过滤
+      handshakeTimeoutMs: HANDSHAKE_TIMEOUT_MS,
+      // 回复通知回注场景：不要求 @ 机器人。群/发送者白名单统一在
+      // shouldHandle（业务层）判断——allowedChatIds ∪ 通知目标 chatId ∪ 自动识别过的群，
+      // SDK 层若再设 groupAllowlist 会把后两类误拒。
       policy: {
         requireMention: false,
         respondToMentionAll: false,
-        ...(Array.isArray(this.cfg.allowedChatIds) && this.cfg.allowedChatIds.length > 0
-          ? { groupAllowlist: this.cfg.allowedChatIds }
-          : {}),
       },
     });
     this.channel = channel;
@@ -295,6 +325,7 @@ class SdkFeishuClient implements FeishuClient {
       .then(() => {
         this.connected = true;
         this.connectPromise = null;
+        this.restartDelay = 3000; // 连接成功后重置重连退避
         this.log('feishu-connected', undefined, 'INFO');
       })
       .catch((err: unknown) => {
@@ -340,6 +371,15 @@ class SdkFeishuClient implements FeishuClient {
   isConnected(): boolean {
     return this.connected;
   }
+
+  /** 凭证/域名是否与另一份配置不一致（/reload 改了 appId 等需要重建单例）。 */
+  credentialsDiffer(cfg: FeishuNotifyConfig): boolean {
+    return (
+      cfg.appId !== this.cfg.appId ||
+      cfg.appSecret !== this.cfg.appSecret ||
+      resolveDomain(cfg.domain) !== resolveDomain(this.cfg.domain)
+    );
+  }
 }
 
 /** 获取进程级单例 FeishuClient。 */
@@ -348,6 +388,12 @@ export function getFeishuClient(
   log?: (event: string, data?: Record<string, unknown>, level?: string) => void,
 ): FeishuClient {
   const g = globalThis as Record<symbol, unknown>;
+  const existing = g[CLIENT_KEY];
+  // 配置（凭证/域名）变了就重建单例，否则 reload 后仍会用旧凭证建连
+  if (existing instanceof SdkFeishuClient && existing.credentialsDiffer(cfg)) {
+    existing.close();
+    delete g[CLIENT_KEY];
+  }
   if (!g[CLIENT_KEY]) {
     g[CLIENT_KEY] = new SdkFeishuClient(cfg, log);
   }

@@ -55,28 +55,12 @@ export function loadSettingsSection(cwd: string, key: string): Record<string, un
  * 这样从 pi-lark-notify 或 @amaster.ai/pi-lark 迁移时 settings 无需改动。
  */
 export function loadConfig(cwd: string): FeishuNotifyConfig {
-  const read = (file: string, key: string): FeishuNotifyConfig => {
-    try {
-      const parsed = JSON.parse(readFileSync(file, 'utf8'));
-      const section = parsed?.[key];
-      return section && typeof section === 'object' && !Array.isArray(section)
-        ? (section as FeishuNotifyConfig)
-        : {};
-    } catch {
-      return {};
-    }
-  };
-  const globalCfg = read(join(homedir(), '.pi', 'agent', 'settings.json'), SECTION_KEY);
-  const projectCfg = read(join(cwd, '.pi', 'settings.json'), SECTION_KEY);
-  const merged = { ...globalCfg, ...projectCfg };
+  const merged = { ...loadSettingsSection(cwd, SECTION_KEY) } as FeishuNotifyConfig;
 
   // 凭证回退：lark-notify（pi-lark-notify 扩展）→ pi-lark（@amaster.ai/pi-lark）
   if (!merged.appId || !merged.appSecret) {
     for (const legacyKey of ['lark-notify', 'pi-lark']) {
-      const legacy = {
-        ...read(join(homedir(), '.pi', 'agent', 'settings.json'), legacyKey),
-        ...read(join(cwd, '.pi', 'settings.json'), legacyKey),
-      } as FeishuNotifyConfig;
+      const legacy = loadSettingsSection(cwd, legacyKey) as FeishuNotifyConfig;
       if (!merged.appId) merged.appId = legacy.appId;
       if (!merged.appSecret) merged.appSecret = legacy.appSecret;
       if (!merged.domain) merged.domain = legacy.domain;

@@ -3,6 +3,7 @@ import {
   extractAssistantText,
   extractReplyText,
   stripThinkingMarkers,
+  unwrapTextShell,
   buildNotification,
   buildNotificationMarkdown,
   buildNotificationText,
@@ -100,6 +101,37 @@ describe('buildNotification', () => {
     expect(r.format).toBe('text');
     expect(r.content).toContain('项目: my-app');
   });
+
+  it('includeSummary=false 省略会话摘要', () => {
+    const r = buildNotification({ locale: 'zh', includeSummary: false } as FeishuNotifyConfig, meta, '这是摘要');
+    expect(r.content).not.toContain('这是摘要');
+    expect(r.content).toContain('**项目**：my-app'); // 元信息仍在
+    // text 格式同样生效
+    const t = buildNotification({ locale: 'zh', includeSummary: false, messageFormat: 'text' } as FeishuNotifyConfig, meta, '这是摘要');
+    expect(t.content).not.toContain('这是摘要');
+  });
+
+  it('includeSummary 缺省视为 true（默认带摘要）', () => {
+    const r = buildNotification({ locale: 'zh' } as FeishuNotifyConfig, meta, '这是摘要');
+    expect(r.content).toContain('这是摘要');
+  });
+});
+
+describe('unwrapTextShell（JSON 外壳剥离）', () => {
+  it('剥掉 {"text":"..."} 外壳', () => {
+    expect(unwrapTextShell('{"text":"hello"}')).toBe('hello');
+    expect(unwrapTextShell('  {"text":"hello"}  ')).toBe('hello');
+  });
+
+  it('合法 JSON 但没有 text 字段 → 原样返回（不能丢内容）', () => {
+    expect(unwrapTextShell('{"a":1}')).toBe('{"a":1}');
+    expect(unwrapTextShell('[1,2]')).toBe('[1,2]');
+    expect(unwrapTextShell('"123"')).toBe('"123"');
+  });
+
+  it('非 JSON 纯文本原样返回（去除首尾空白）', () => {
+    expect(unwrapTextShell('  继续  ')).toBe('继续');
+  });
 });
 
 describe('extractReplyText', () => {
@@ -111,8 +143,16 @@ describe('extractReplyText', () => {
     expect(extractReplyText('{"text":"继续"}', 'text')).toBe('继续');
   });
 
+  it('text 是 JSON 形状的正文（无 text 字段）→ 原样返回', () => {
+    expect(extractReplyText('{"a":1}', 'text')).toBe('{"a":1}');
+  });
+
   it('post 类型（SDK 已转纯文本）直接返回', () => {
     expect(extractReplyText('继续\n\n细节', 'post')).toBe('继续\n\n细节');
+  });
+
+  it('post 类型正文是 JSON 形状也不剥壳', () => {
+    expect(extractReplyText('{"a":1}', 'post')).toBe('{"a":1}');
   });
 
   it('去除首尾空白', () => {
@@ -136,6 +176,11 @@ describe('stripThinkingMarkers（防御性思考内容清理）', () => {
   it('不误伤行中删除线 markdown', () => {
     // 删除线不在行首，不应被清掉
     expect(stripThinkingMarkers('结果 ~~已删除~~ 保留')).toContain('~~已删除~~');
+  });
+
+  it('不误伤 ~~~ 波浪线代码围栏', () => {
+    const md = '~~~js\nconst a = 1;\n~~~\n答案';
+    expect(stripThinkingMarkers(md)).toBe(md);
   });
 
   it('空/空串安全返回', () => {

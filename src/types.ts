@@ -24,11 +24,14 @@ export interface FeishuNotifyConfig {
   receipt?: boolean;
   /** 只处理来自该用户的消息（私聊 open_id），未配置则只处理单聊任意用户 */
   allowedSenderIds?: string[];
-  /** 只处理来自这些群的消息（chat_id 列表） */
+  /**
+   * 允许处理消息的群（chat_id 列表）。实际放行范围是三者的并集：
+   * allowedChatIds ∪ 通知目标 chatId ∪ 自动识别过的群；三者都为空时群聊一律忽略。
+   */
   allowedChatIds?: string[];
-  /** 通知模板是否包含会话摘要 */
+  /** 通知模板是否包含会话摘要（默认 true；false 只发元信息） */
   includeSummary?: boolean;
-  /** 崩溃残留状态清理天数 */
+  /** 残留状态（会话注册表历史、通知路由记录）保留天数，默认 7 */
   staleDays?: number;
   /**
    * 最短任务时长（毫秒）。仅当本次任务从 agent_start 到

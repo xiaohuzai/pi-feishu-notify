@@ -245,3 +245,84 @@ describe('follow-up 回注：只发最终结果，不泄漏 thinking/toolUse', (
     expect(handlers['message_end']).toBeUndefined();
   });
 });
+
+describe('发送目标解析与通知内容', () => {
+  const CLIENT_KEY = Symbol.for('pi-feishu-notify.client');
+  const PROJ = '/tmp/pi-fn-it/proj';
+
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[CLIENT_KEY];
+    rmSync(join(PROJ, '.pi'), { recursive: true, force: true });
+  });
+
+  function writeCfg(cfg: Record<string, unknown>) {
+    mkdirSync(join(PROJ, '.pi'), { recursive: true });
+    writeFileSync(join(PROJ, '.pi', 'settings.json'), JSON.stringify({ 'feishu-notify': cfg }));
+  }
+
+  function makeMock() {
+    return {
+      sendText: vi.fn(async (_text: string) => ({ ok: true, messageId: 'rcpt-x' })),
+      sendMarkdown: vi.fn(async (_content: string, _target?: { userId?: string; chatId?: string }) => ({ ok: true, messageId: 'notify-x' })),
+      updateText: vi.fn(async () => true),
+      subscribe: vi.fn(() => () => {}),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+  }
+
+  /** 建连 + 触发 agent_settled，返回 mock。 */
+  async function runSettled(extraCtx: Partial<ExtensionContext> = {}) {
+    const mockClient = makeMock();
+    (globalThis as Record<symbol, unknown>)[CLIENT_KEY] = mockClient;
+    const pi = { on: vi.fn(), registerCommand: vi.fn(), sendUserMessage: vi.fn(), sendMessage: vi.fn() } as unknown as ExtensionAPI;
+    (await import('../extensions/feishu-notify.js')).default(pi);
+    const handlers = Object.fromEntries(
+      (pi.on as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => [c[0], c[1]]),
+    ) as Record<string, (e: unknown, ctx: ExtensionContext) => void | Promise<void>>;
+    await handlers['session_start']?.({ type: 'session_start', reason: 'startup' }, makeCtx());
+    if (handlers['agent_end'] && extraCtx.sessionManager) {
+      await handlers['agent_end']({ type: 'agent_end', messages: [] }, makeCtx(extraCtx));
+    }
+    await handlers['agent_settled']?.({ type: 'agent_settled' }, makeCtx(extraCtx));
+    return mockClient;
+  }
+
+  it('只配 chatId 时，自动识别的 userId 不劫持发送目标', async () => {
+    writeCfg({ enabled: true, appId: 'cli_test', appSecret: 'secret_test', chatId: 'oc_target' });
+    // 曾有用户私聊过 bot（自动识别到 open_id）
+    recordDiscovered('ou_auto', undefined);
+
+    const mockClient = await runSettled();
+
+    expect(mockClient.sendMarkdown).toHaveBeenCalledTimes(1);
+    const target = mockClient.sendMarkdown.mock.calls[0]?.[1];
+    expect(target).toEqual({ userId: undefined, chatId: 'oc_target' });
+  });
+
+  it('includeSummary=false 时通知不含会话摘要', async () => {
+    writeCfg({
+      enabled: true,
+      appId: 'cli_test',
+      appSecret: 'secret_test',
+      userId: 'ou_test',
+      includeSummary: false,
+    });
+    const branch = [
+      { type: 'message', message: { role: 'assistant', content: [{ type: 'text', text: '内部摘要不应出现' }] } },
+    ];
+
+    const mockClient = await runSettled({
+      sessionManager: {
+        getSessionId: () => 'session-test-1',
+        getBranch: () => branch,
+        getCwd: () => PROJ,
+      } as unknown as ExtensionContext['sessionManager'],
+    });
+
+    expect(mockClient.sendMarkdown).toHaveBeenCalledTimes(1);
+    const md = String(mockClient.sendMarkdown.mock.calls[0]?.[0] ?? '');
+    expect(md).not.toContain('内部摘要不应出现');
+    expect(md).toContain('Project'); // 元信息仍发送
+  });
+});

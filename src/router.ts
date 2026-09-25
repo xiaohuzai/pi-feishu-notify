@@ -31,7 +31,7 @@ function dedupLockDir(): string {
   return join(stateDir(), 'feishu-notify-dedup.lock');
 }
 
-/** 清理超过 maxAgeMs 的记录（默认 7 天）。 */
+/** 清理超过 maxAgeMs 的记录。 */
 function pruneByAge<T extends { ts: number }>(
   map: Record<string, T>,
   maxAgeMs: number,
@@ -42,9 +42,18 @@ function pruneByAge<T extends { ts: number }>(
   }
 }
 
+/** 保留天数（staleDays）→ 毫秒；未配置或非法时默认 7 天。 */
+export function retentionMs(days: number | undefined, fallbackDays = 7): number {
+  const d = Number(days);
+  return (Number.isFinite(d) && d > 0 ? d : fallbackDays) * 24 * 60 * 60 * 1000;
+}
+
 export class NotificationRouter {
-  /** 记录一条通知的归属：message_id → session */
-  record(messageId: string, sid: string): void {
+  /**
+   * 记录一条通知的归属：message_id → session。
+   * @param retentionDays 记录保留天数（配置 staleDays），默认 7 天
+   */
+  record(messageId: string, sid: string, retentionDays?: number): void {
     if (!messageId || !sid) return;
     mutateJson<NotificationMap>(
       routerFile(),
@@ -53,7 +62,7 @@ export class NotificationRouter {
       (map) => {
         map[messageId] = { sid, ts: Date.now() };
       },
-      (map) => pruneByAge(map, 7 * 24 * 60 * 60 * 1000),
+      (map) => pruneByAge(map, retentionMs(retentionDays)),
     );
   }
 

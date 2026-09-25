@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { NotificationRouter, ClaimDedup } from '../src/router.js';
+import { NotificationRouter, ClaimDedup, retentionMs } from '../src/router.js';
 import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 // 每个测试文件用独立的 state 目录，避免并行时与其他测试文件共用 ~/.pi/agent 造成竞争
@@ -49,6 +49,36 @@ describe('NotificationRouter', () => {
     router.record('', 'session-A');
     router.record('msg-x', '');
     expect(router.size()).toBe(0);
+  });
+
+  it('record 按 retentionDays（staleDays）清理过期记录', () => {
+    // 预置一条 8 天前的旧记录
+    writeFileSync(
+      join(stateDir(), 'feishu-notify-router.json'),
+      JSON.stringify({ 'msg-old': { sid: 'session-old', ts: Date.now() - 8 * 24 * 60 * 60 * 1000 } }),
+    );
+    const router = new NotificationRouter();
+    router.record('msg-new', 'session-new', 7); // 保留 7 天 → 8 天前的应被清理
+    expect(router.lookup('msg-old')).toBeUndefined();
+    expect(router.lookup('msg-new')).toBe('session-new');
+  });
+
+  it('retentionDays 更大时保留旧记录', () => {
+    writeFileSync(
+      join(stateDir(), 'feishu-notify-router.json'),
+      JSON.stringify({ 'msg-old': { sid: 'session-old', ts: Date.now() - 8 * 24 * 60 * 60 * 1000 } }),
+    );
+    const router = new NotificationRouter();
+    router.record('msg-new', 'session-new', 30);
+    expect(router.lookup('msg-old')).toBe('session-old');
+    expect(router.lookup('msg-new')).toBe('session-new');
+  });
+
+  it('retentionMs：非法/未配置回退默认 7 天', () => {
+    expect(retentionMs(undefined)).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(retentionMs(0)).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(retentionMs(-3)).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(retentionMs(30)).toBe(30 * 24 * 60 * 60 * 1000);
   });
 });
 

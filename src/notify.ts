@@ -36,9 +36,30 @@ export function stripThinkingMarkers(text: string): string {
   let out = text;
   // `<thinking>...</thinking>`（含多行）
   out = out.replace(/<\s*thinking\s*>[\s\S]*?<\/\s*thinking\s*>/gi, '');
-  // qwen 行首 `~~...~~` 思考段（可能跨多行，直到不再以 ~~ 续行）
-  out = out.replace(/^~{2}[\s\S]*?~{2}\s*/m, '');
+  // qwen 行首 `~~...~~` 思考段（可能跨多行，直到不再以 ~~ 续行）。
+  // 开闭 `~~` 均不允许是 `~~~` 的一部分，避免误删 `~~~` 代码围栏。
+  out = out.replace(/^~~(?!~)[\s\S]*?(?<!~)~~\s*/m, '');
   return out.trim();
+}
+
+/**
+ * 剥掉 text 消息的 `{"text":"..."}` JSON 外壳，取出纯文本。
+ *
+ * 只对「看起来是 JSON」的 content 做解析（text 消息 content 是 {"text":"..."}）；
+ * SDK 对 post 消息已转成纯文本，纯文本即使是合法 JSON（如 "123"、`{"a":1}`）
+ * 也不该被误拆——解析不出 text 字段时原样返回。
+ */
+export function unwrapTextShell(content: string): string {
+  const trimmed = content.trim();
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(trimmed) as { text?: unknown };
+      if (typeof parsed.text === 'string') return parsed.text.trim();
+    } catch {
+      // 不是合法 JSON → 原样返回
+    }
+  }
+  return trimmed;
 }
 
 export interface NotificationMeta {
@@ -89,7 +110,8 @@ export function buildNotificationText(
 /**
  * 按配置选格式构建通知内容。
  * messageFormat 缺省视为 'markdown'（默认 markdown 美化）；
- * locale 缺省视为 auto（按 LANG 环境变量判断）。
+ * locale 缺省视为 auto（按 LANG 环境变量判断）；
+ * includeSummary === false 时省略会话摘要。
  */
 export function buildNotification(
   cfg: FeishuNotifyConfig,
@@ -97,31 +119,22 @@ export function buildNotification(
   summary?: string,
 ): { format: 'markdown' | 'text'; content: string } {
   const locale = resolveLocale(cfg.locale);
+  const effectiveSummary = cfg.includeSummary === false ? undefined : summary;
   if (cfg.messageFormat === 'text') {
-    return { format: 'text', content: buildNotificationText(meta, summary, locale) };
+    return { format: 'text', content: buildNotificationText(meta, effectiveSummary, locale) };
   }
-  return { format: 'markdown', content: buildNotificationMarkdown(meta, summary, locale) };
+  return { format: 'markdown', content: buildNotificationMarkdown(meta, effectiveSummary, locale) };
 }
 
 /**
  * 从飞书回复消息里提取要回注的文本。
  *
- * SDK 已把 post 消息转成纯文本（convertPost），text 消息 content 是纯文本；
- * 这里统一取 content.trim()，并对「JSON 外壳」做兜底（如 text 消息的
- * {"text":"..."} 形式），保证 post/text 两类回复都能拿到干净文本。
+ * SDK 已把 post 消息转成纯文本（convertPost），text 消息 content 可能带
+ * `{"text":"..."}` JSON 外壳；这里统一剥壳取纯文本，保证 post/text 两类
+ * 回复都能拿到干净文本。
  */
 export function extractReplyText(content: string, rawContentType?: string): string {
-  const trimmed = content.trim();
-  // post 类型：SDK 已转纯文本，直接返回
-  if (rawContentType === 'post') return trimmed;
-  // text 类型：可能是 {"text":"..."} 外壳，也可能是纯文本
-  if (trimmed.startsWith('{')) {
-    try {
-      const parsed = JSON.parse(trimmed) as { text?: unknown };
-      if (typeof parsed.text === 'string') return parsed.text.trim();
-    } catch {
-      // fallthrough → 原样返回
-    }
-  }
-  return trimmed;
+  // post 类型：SDK 已转纯文本，直接返回（其正文可能是 JSON 形状，不能剥壳）
+  if (rawContentType === 'post') return content.trim();
+  return unwrapTextShell(content);
 }

@@ -22,6 +22,9 @@ export function stateDir(): string {
   return process.env.PI_FEISHU_NOTIFY_STATE_DIR ?? join(homedir(), '.pi', 'agent');
 }
 
+/** 等锁用的休眠缓冲（Atomics.wait 可在 Node 主线程安全睡眠，不空转 CPU）。 */
+const lockSleepBuf = new Int32Array(new SharedArrayBuffer(4));
+
 /** 目录锁：mkdir 原子创建实现跨进程互斥。 */
 export function withDirLock<T>(lockDir: string, fn: () => T): T | undefined {
   let acquired = false;
@@ -39,10 +42,8 @@ export function withDirLock<T>(lockDir: string, fn: () => T): T | undefined {
         } catch {
           // 忽略：竞争删除
         }
-        const until = Date.now() + 75;
-        while (Date.now() < until) {
-          // 忙等 75ms（锁持有时间极短）
-        }
+        // 休眠 75ms 再重试（锁持有时间极短）；Atomics.wait 不烧 CPU
+        Atomics.wait(lockSleepBuf, 0, 0, 75);
         continue;
       }
       break;
