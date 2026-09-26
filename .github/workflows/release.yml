@@ -11,12 +11,11 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  actions: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -87,7 +86,9 @@ jobs:
           if git diff --cached --quiet; then
             echo "No version change, skipping commit"
           else
-            git commit -m "chore: release v$VERSION [skip ci]"
+            # 刻意不带 [skip ci]：版本号 PR 要靠 pull_request CI 产出 main ruleset
+            # 所需的 Test 必需检查，门禁才过得去
+            git commit -m "chore: release v$VERSION"
             PR_NEEDED=true
           fi
           # tag / release 分支都做成幂等：重跑时已存在则复用，不报错
@@ -144,15 +145,13 @@ jobs:
             echo "::error::PR $PR_URL 除版本号外还有其它变更，已停止自动合并，请人工审查"
             exit 1
           fi
-          # 版本提交带 [skip ci]，PR 不会自动跑 CI；而 main ruleset 要求 Test 必需检查——
-          # 显式 dispatch 该检查（workflow_dispatch 不受 [skip ci] 影响），门禁才有得过
-          gh workflow run ci.yml --ref "$RELEASE_BRANCH" \
-            || { echo "::error::触发 CI 失败，无法自动合入。npm $VERSION 已发布成功，请手动处理：$PR_URL"; exit 1; }
+          # 版本提交不带 [skip ci]，PR 会照常跑 pull_request CI 产出 Test 必需检查
+          # （workflow_dispatch 手动补的检查不计入 PR 门禁，实测无效，勿走回头路）
 
           # auto-merge：有必需检查在跑时 --auto 可用，GitHub 在 Test 通过后自动合入；
           # 若 PR 已就绪（检查已过），--auto 被拒（clean status）→ 直接合并兜底
           AUTO=0
-          for i in $(seq 1 60); do
+          for i in $(seq 1 120); do
             STATE=$(gh pr view "$PR_URL" --json state --jq .state)
             if [ "$STATE" = "MERGED" ]; then
               echo "Version bump PR merged automatically: $PR_URL"
