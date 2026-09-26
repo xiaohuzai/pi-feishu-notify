@@ -98,6 +98,17 @@ export function readJson<T>(file: string, def: () => T): T {
   }
 }
 
+/** 清理超过 maxAgeMs 的记录（ts 早于当前时间减 maxAgeMs）。 */
+export function pruneByAge<T extends { ts: number }>(
+  map: Record<string, T>,
+  maxAgeMs: number,
+): void {
+  const cutoff = Date.now() - maxAgeMs;
+  for (const k of Object.keys(map)) {
+    if (map[k] && map[k]!.ts < cutoff) delete map[k];
+  }
+}
+
 export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

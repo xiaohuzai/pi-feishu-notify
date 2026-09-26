@@ -20,17 +20,22 @@ import { loadConfig, canSend } from '../src/config.js';
 import { getFeishuClient, type FeishuClient } from '../src/feishu.js';
 import { NotificationRouter, ClaimDedup } from '../src/router.js';
 import { SessionRegistry } from '../src/sessions.js';
+import { Inbox, decideDelivery } from '../src/inbox.js';
+import { pidAlive } from '../src/state.js';
 import { passesDurationFilter, shouldHandle, shouldLog, type LogVerbosity } from '../src/filter.js';
 import { persistDiscovered } from '../src/settings.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
 import { extractAssistantText, extractReplyText, buildNotification, type NotificationMeta } from '../src/notify.js';
 import { resolveLocale, messages, format, type Locale } from '../src/i18n.js';
-import type { FeishuMessage, FeishuNotifyConfig } from '../src/types.js';
+import type { FeishuMessage, FeishuNotifyConfig, InboxEntry } from '../src/types.js';
 
 /** 记录收到消息的去重集合（进程内，避免 SDK 自身 dedup 外的重复触发）。 */
 const seenMessages = new Set<string>();
 /** 去重集合上限（FIFO 淘汰，避免长驻进程无界增长）。 */
 const SEEN_MESSAGES_MAX = 5000;
+
+/** 转发后等待目标进程取走的时限（毫秒），超时把回执刷成提示。 */
+const FORWARD_STALL_MS = 30_000;
 
 /** 标记消息已处理；返回 false 表示此前已见过。 */
 function markSeen(messageId: string): boolean {
@@ -41,6 +46,42 @@ function markSeen(messageId: string): boolean {
     if (oldest !== undefined) seenMessages.delete(oldest);
   }
   return true;
+}
+
+// ── 跨进程收件箱轮询（进程级单例） ─────────────────────────────────
+//
+// 飞书长连接是集群投递：同应用多 client 时一条事件只随机到一个，回注指令可能
+// 由别的进程认领后写进收件箱。这里轮询取回**本进程**的条目（pid 命中或 session
+// 在本进程），再走本地回注。reload 后旧扩展实例的闭包会失效，因此 timer 常驻、
+// handler 可替换（与 FeishuClient 的 currentHandler 同思路）。
+
+const INBOX_POLL_KEY = Symbol.for('pi-feishu-notify.inbox-poll');
+type InboxPollState = { timer?: ReturnType<typeof setInterval>; drain?: () => void };
+
+function pollIntervalMs(): number {
+  const n = Number(process.env.PI_FEISHU_NOTIFY_INBOX_POLL_MS);
+  return Number.isFinite(n) && n > 0 ? n : 1000;
+}
+
+/** 注册（或替换）收件箱处理函数，并确保进程级轮询已启动。 */
+function ensureInboxPoller(drain: () => void): void {
+  const g = globalThis as Record<symbol, unknown>;
+  let st = g[INBOX_POLL_KEY] as InboxPollState | undefined;
+  if (!st) {
+    st = {};
+    g[INBOX_POLL_KEY] = st;
+  }
+  st.drain = drain;
+  if (!st.timer) {
+    st.timer = setInterval(() => {
+      try {
+        st?.drain?.();
+      } catch {
+        // 轮询异常不阻断主流程
+      }
+    }, pollIntervalMs());
+    st.timer.unref?.();
+  }
 }
 
 /**
@@ -90,6 +131,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   const router = new NotificationRouter();
   const dedup = new ClaimDedup();
   const registry = new SessionRegistry();
+  const inbox = new Inbox();
   let client: FeishuClient | undefined;
   // 每个 session 的日志器（按各自配置的 logLevel 过滤）
   const logs = new Map<string, (event: string, data?: Record<string, unknown>, severity?: string) => void>();
@@ -205,9 +247,160 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     const text = extractReplyText(msg.content, msg.rawContentType);
     if (!text) return;
 
-    sessionLog(targetSid)('reply-injected', { to: targetSid, from: msg.senderName ?? msg.senderId, text });
-    await injectReply(targetSid, text, msg);
+    await deliverReply(targetSid, text, msg);
     router.remove(msg.replyToMessageId ?? '');
+  }
+
+  /**
+   * 投递一条回注指令：按会话归属决定本地回注 / 跨进程转发 / 会话已结束。
+   *
+   * 飞书长连接是集群投递（一条事件只随机到一个 client），认领到回复的进程
+   * 未必是目标 session 所在的进程。目标 session 在别的存活进程时把指令写进
+   * 收件箱（Inbox），由目标进程轮询取回后用 pi.sendUserMessage 本地回注——
+   * 后者只能注入本进程的会话。
+   */
+  async function deliverReply(targetSid: string, text: string, msg: FeishuMessage): Promise<void> {
+    const decision = decideDelivery({
+      targetSid,
+      localSids: new Set(configs.keys()),
+      registryEntry: registry.get(targetSid),
+      isPidAlive: pidAlive,
+      myPid: process.pid,
+      currentSid,
+      currentCwd: currentSid ? sessionCwds.get(currentSid) : undefined,
+      aliveSessions: registry.alive(),
+    });
+
+    if (decision.kind === 'local') {
+      sessionLog(targetSid)(decision.stale ? 'reply-stale-session' : 'reply-injected', {
+        to: targetSid,
+        ...(decision.stale ? { fallbackTo: decision.sid } : {}),
+        from: msg.senderName ?? msg.senderId,
+        text,
+      });
+      await injectReply(decision.sid, text, msg.senderName);
+      return;
+    }
+
+    if (decision.kind === 'forward') {
+      // 目标 session 在另一个存活进程：写收件箱由对方取回，回执告知「正在转达」
+      const cfg = configForMessage(msg) ?? {};
+      const locale = resolveLocale(cfg.locale);
+      const receiptMsgId = await sendReceiptTo(
+        cfg,
+        locale,
+        registry.get(targetSid)?.cwd,
+        `${messages(locale).receipt.forwarded}（${text}）`,
+        msg,
+      );
+      inbox.enqueue({
+        id: msg.messageId,
+        sid: decision.sid,
+        pid: decision.pid,
+        text,
+        senderName: msg.senderName,
+        cwd: registry.get(targetSid)?.cwd,
+        receiptMsgId,
+        receipt: cfg.receipt !== false,
+        locale: resolveLocale(cfg.locale),
+        hops: 1,
+        replyChatId: msg.chatId,
+        replySenderId: msg.senderId,
+        replyChatType: msg.chatType,
+        ts: Date.now(),
+      });
+      sessionLog(targetSid)('reply-forwarded', {
+        to: decision.sid,
+        pid: decision.pid,
+        reason: decision.stale ? 'same-project' : 'exact',
+        text,
+      });
+      // 看护：目标进程一直没取走（挂起/版本不支持轮询）→ 把回执刷成提示，避免误导性沉默
+      if (receiptMsgId) {
+        const watch = setTimeout(() => {
+          if (inbox.get(msg.messageId)) {
+            void client
+              ?.updateText(receiptMsgId, messages(locale).receipt.forwardStalled)
+              .catch(() => undefined);
+            sessionLog(targetSid)('reply-forward-stalled', { to: decision.sid, pid: decision.pid }, 'WARN');
+          }
+        }, FORWARD_STALL_MS);
+        watch.unref?.();
+      }
+      return;
+    }
+
+    // 目标会话（含同项目会话）均已结束
+    sessionLog(targetSid)('reply-session-gone', { to: targetSid, sameProject: false }, 'WARN');
+    const cfg = configForMessage(msg) ?? {};
+    await sendReceiptTo(
+      cfg,
+      resolveLocale(cfg.locale),
+      registry.get(targetSid)?.cwd,
+      messages(resolveLocale(cfg.locale)).receipt.sessionGone,
+      msg,
+    );
+  }
+
+  /**
+   * 取回收件箱中属于本进程的指令并本地回注（轮询器定期调用）。
+   *
+   * 判定「属于本进程」：目标 session 在本进程 configs 中，或注册表记录的 pid
+   * 就是本进程（session 可能已切走/结束，交回 delivery 决策处理回退）。
+   * 取走即从收件箱删除（Inbox.take 原子操作），避免多进程重复投递。
+   */
+  function drainInbox(): void {
+    const taken = inbox.take((e) => configs.has(e.sid) || e.pid === process.pid);
+    for (const e of taken) {
+      void deliverInboxEntry(e).catch((err: unknown) => {
+        sessionLog(e.sid)(
+          'inbox-deliver-failed',
+          { to: e.sid, error: err instanceof Error ? err.message : String(err) },
+          'ERROR',
+        );
+      });
+    }
+  }
+
+  /** 投递一条收件箱条目：本地注入 / 同项目再转发（有限跳数）/ 会话已结束。 */
+  async function deliverInboxEntry(e: InboxEntry): Promise<void> {
+    const decision = decideDelivery({
+      targetSid: e.sid,
+      localSids: new Set(configs.keys()),
+      registryEntry: registry.get(e.sid),
+      isPidAlive: pidAlive,
+      myPid: process.pid,
+      currentSid,
+      currentCwd: currentSid ? sessionCwds.get(currentSid) : undefined,
+      aliveSessions: registry.alive(),
+    });
+
+    if (decision.kind === 'local') {
+      sessionLog(decision.sid)(decision.stale ? 'inbox-stale-fallback' : 'inbox-delivered', {
+        to: e.sid,
+        ...(decision.stale ? { fallbackTo: decision.sid } : {}),
+        text: e.text,
+      });
+      await injectReply(decision.sid, e.text, e.senderName, e.receiptMsgId);
+      return;
+    }
+
+    if (decision.kind === 'forward') {
+      // 目标会话已漂移到第三个进程（本进程只剩注册表残留）：有限跳数再转发，防环
+      const hops = e.hops ?? 0;
+      if (hops < 3) {
+        inbox.enqueue({ ...e, sid: decision.sid, pid: decision.pid, hops: hops + 1, ts: Date.now() });
+        sessionLog(e.sid)('inbox-reforward', { to: decision.sid, pid: decision.pid, hops: hops + 1 }, 'WARN');
+        return;
+      }
+    }
+
+    // 无处投递：优先把转发方的「正在转达」回执原地刷成「会话已结束」，避免误导
+    sessionLog(e.sid)('inbox-session-gone', { to: e.sid, hops: e.hops ?? 0 }, 'WARN');
+    const t = messages(e.locale ?? resolveLocale(undefined));
+    if (e.receiptMsgId) {
+      void client?.updateText(e.receiptMsgId, t.receipt.sessionGone).catch(() => undefined);
+    }
   }
 
   /**
@@ -226,40 +419,35 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   }
 
   /**
-   * 回注指令到目标 session。
-   *
-   * 目标 session 不在当前进程（configs 中不存在）时，不再直接放弃：
-   *  - 若目标 session 与当前会话属于同一项目（cwd 相同），回退注入到当前会话
-   *    （用户回复通知的本意就是"继续这个项目"，而单进程内 pi.sendUserMessage
-   *     只能作用于当前激活会话）；
-   *  - 否则（项目也对不上）才发"会话已结束"回执。
+   * 本地回注指令到目标 session（调用前须确认目标 session 在本进程）。
    *
    * 流程：先发「已收到」回执并启动进度心跳（在 sendUserMessage 之前，保证用户
    * 立即得到飞书反馈）；agent_end 记录最终文本、agent_settled 停掉心跳并发送
    * 最终 markdown 结果。注意 pi.sendUserMessage 是 fire-and-forget（包装层不返回
    * Promise），这里的 try/catch 只能捕获同步抛出的错误（如 session 已失效）。
+   *
+   * receiptMsgId：跨进程转发时由转发方发出的回执 message_id，本进程直接接管
+   * 进度心跳（原地刷新那条消息），不再另发一条「已收到」。
    */
-  async function injectReply(sid: string, text: string, msg: FeishuMessage): Promise<void> {
-    // 目标 session 不在当前进程 → 判断是否同项目可回退到当前会话
-    if (!configs.has(sid)) {
-      const entry = registry.get(sid);
-      const curCwd = currentSid ? sessionCwds.get(currentSid) : undefined;
-      const sameProject = Boolean(entry && curCwd && entry.cwd === curCwd);
-      if (!sameProject) {
-        sessionLog(sid)('reply-session-gone', { to: sid, sameProject: false }, 'WARN');
-        void sendReceipt(sid, messages(sessionLocale(sid)).receipt.sessionGone);
-        return;
-      }
-      sessionLog(sid)('reply-stale-session', { to: sid, fallbackTo: currentSid, sameProject: true }, 'WARN');
-      sid = currentSid as string;
-    }
+  async function injectReply(
+    sid: string,
+    text: string,
+    senderName: string | undefined,
+    receiptMsgId?: string,
+  ): Promise<void> {
     const t = messages(sessionLocale(sid));
     const prompt =
       `[feishu-notify] ${format(t.inject.prompt, {
-        name: msg.senderName ? ` 「${msg.senderName}」` : '',
+        name: senderName ? ` 「${senderName}」` : '',
       })}${text}`;
     // 先发回执 + 启动进度心跳（必须在 sendUserMessage 之前）
-    const msgId = await sendReceipt(sid, `${t.receipt.received}（${text}）`);
+    let msgId = receiptMsgId;
+    if (msgId) {
+      // 接管转发方的「正在转达」回执：原地刷成「已收到」，用户视角无缝衔接
+      void client?.updateText(msgId, `${t.receipt.received}（${text}）`).catch(() => undefined);
+    } else {
+      msgId = await sendReceipt(sid, `${t.receipt.received}（${text}）`);
+    }
     if (msgId) startProgress(sid, msgId);
     try {
       await pi.sendUserMessage(prompt, { deliverAs: 'followUp' });
@@ -283,11 +471,40 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   async function sendReceipt(sid: string, text: string): Promise<string | undefined> {
     const cfg = configs.get(sid);
     if (!cfg || cfg.receipt === false) return undefined;
-    const project = basename(sessionCwds.get(sid) ?? '') || '?';
-    const target = resolveSendTarget(cfg, sessionLog(sid));
-    const r = await client?.sendText(`${text}\n\n${messages(sessionLocale(sid)).notification.project}: ${project}`, target);
+    return sendReceiptTo(
+      cfg,
+      sessionLocale(sid),
+      sessionCwds.get(sid),
+      text,
+      undefined,
+      sessionLog(sid),
+    );
+  }
+
+  /**
+   * 向「回复来源」所在配置的发送目标发一条回执文本。
+   *
+   * 与 sendReceipt 的区别：不依赖目标 session 在本进程（configs 里查不到 sid），
+   * 用于跨进程转发 / 会话已结束等路径——此时按回复消息匹配到的配置决定
+   * 回执开关、语言与发送目标，并把项目目录显式传入。
+   */
+  async function sendReceiptTo(
+    cfg: FeishuNotifyConfig,
+    locale: Locale,
+    cwd: string | undefined,
+    text: string,
+    msg?: FeishuMessage,
+    logc?: (event: string, data?: Record<string, unknown>, severity?: string) => void,
+  ): Promise<string | undefined> {
+    if (cfg.receipt === false) return undefined;
+    const project = basename(cwd ?? '') || '?';
+    const target = resolveSendTarget(cfg, logc ?? log);
+    const r = await client?.sendText(
+      `${text}\n\n${messages(locale).notification.project}: ${project}`,
+      target,
+    );
     if (!r?.ok) {
-      if (r) sessionLog(sid)('receipt-failed', { error: r.error }, 'ERROR');
+      if (r) (logc ?? log)('receipt-failed', { error: r.error, replyFrom: msg?.senderId }, 'ERROR');
       return undefined;
     }
     return r.messageId;
@@ -460,6 +677,9 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     if (currentSid === sid) currentSid = undefined;
     sessionLog(sid)('session-shutdown', { sid });
   });
+
+  // 跨进程收件箱轮询：别的进程认领到回复后写入的指令，这里取回本地回注
+  ensureInboxPoller(drainInbox);
 
   // ── 命令：手动发送通知 / 查看状态 ─────────────────────────────
 

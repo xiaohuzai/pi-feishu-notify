@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { join } from 'node:path';
-import { rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
@@ -8,16 +9,18 @@ import { recordDiscovered } from '../src/discovery.js';
 
 // 每个测试文件用独立的 state 目录，避免并行时与其他测试文件共用 ~/.pi/agent 造成竞争
 isolateStateDir('integration');
+// 收件箱轮询加速：pickup 测试靠轮询取回，间隔调小避免拖慢用例
+process.env.PI_FEISHU_NOTIFY_INBOX_POLL_MS = '50';
 
 function cleanupState() {
-  for (const f of ['feishu-notify-router.json', 'feishu-notify-dedup.json', 'feishu-notify-sessions.json', 'feishu-notify-discovered.json']) {
+  for (const f of ['feishu-notify-router.json', 'feishu-notify-dedup.json', 'feishu-notify-sessions.json', 'feishu-notify-discovered.json', 'feishu-notify-inbox.json']) {
     try {
       rmSync(join(stateDir(), f), { force: true });
     } catch {
       // noop
     }
   }
-  for (const d of ['feishu-notify-router.lock', 'feishu-notify-dedup.lock', 'feishu-notify-sessions.lock', 'feishu-notify-discovered.lock']) {
+  for (const d of ['feishu-notify-router.lock', 'feishu-notify-dedup.lock', 'feishu-notify-sessions.lock', 'feishu-notify-discovered.lock', 'feishu-notify-inbox.lock']) {
     try {
       rmSync(join(stateDir(), d), { recursive: true, force: true });
     } catch {
@@ -324,5 +327,159 @@ describe('发送目标解析与通知内容', () => {
     const md = String(mockClient.sendMarkdown.mock.calls[0]?.[0] ?? '');
     expect(md).not.toContain('内部摘要不应出现');
     expect(md).toContain('Project'); // 元信息仍发送
+  });
+});
+
+describe('跨进程回注（issue #14：WS 事件落在非目标 session 的进程）', () => {
+  const CLIENT_KEY = Symbol.for('pi-feishu-notify.client');
+  const PROJ = '/tmp/pi-fn-it/proj';
+  let child: ReturnType<typeof spawn> | undefined;
+
+  beforeEach(() => {
+    // 模拟「另一个存活的 pi 进程」：spawn 一个长驻 node 进程拿它的 pid
+    child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  });
+  afterEach(() => {
+    child?.kill();
+    child = undefined;
+    delete (globalThis as Record<symbol, unknown>)[CLIENT_KEY];
+    rmSync(join(PROJ, '.pi'), { recursive: true, force: true });
+    cleanupState();
+  });
+
+  function writeCfg(cfg: Record<string, unknown>) {
+    mkdirSync(join(PROJ, '.pi'), { recursive: true });
+    writeFileSync(join(PROJ, '.pi', 'settings.json'), JSON.stringify({ 'feishu-notify': cfg }));
+  }
+
+  function makeMock() {
+    return {
+      sendText: vi.fn(async (_text: string, _target?: { userId?: string; chatId?: string }) => ({ ok: true, messageId: 'rcpt-y' })),
+      sendMarkdown: vi.fn(async (_content: string, _target?: { userId?: string; chatId?: string }) => ({ ok: true, messageId: 'notify-y' })),
+      updateText: vi.fn(async (_id: string, _text: string) => true),
+      subscribe: vi.fn(() => () => {}),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+  }
+
+  /** 建立本进程 session（session-test-1）+ 建连，返回 mock 与事件 handler。 */
+  async function setupLocalSession() {
+    writeCfg({ enabled: true, appId: 'cli_test', appSecret: 'secret_test', userId: 'ou_test', replyEnabled: true, receipt: true, locale: 'zh' });
+    const mockClient = makeMock();
+    (globalThis as Record<symbol, unknown>)[CLIENT_KEY] = mockClient;
+    const pi = { on: vi.fn(), registerCommand: vi.fn(), sendUserMessage: vi.fn(), sendMessage: vi.fn() } as unknown as ExtensionAPI;
+    (await import('../extensions/feishu-notify.js')).default(pi);
+    const handlers = Object.fromEntries(
+      (pi.on as ReturnType<typeof vi.fn>).mock.calls.map((c: unknown[]) => [c[0], c[1]]),
+    ) as Record<string, (e: unknown, ctx: ExtensionContext) => void | Promise<void>>;
+    await handlers['session_start']?.({ type: 'session_start', reason: 'startup' }, makeCtx());
+    const sub = (mockClient.subscribe as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as (msg: unknown) => void;
+    return { mockClient, pi, handlers, sub };
+  }
+
+  function writeRegistry(map: Record<string, { pid: number; cwd: string; startedAt: string }>) {
+    writeFileSync(join(stateDir(), 'feishu-notify-sessions.json'), JSON.stringify(map, null, 2));
+  }
+
+  function writeRouter(map: Record<string, { sid: string; ts: number }>) {
+    writeFileSync(join(stateDir(), 'feishu-notify-router.json'), JSON.stringify(map, null, 2));
+  }
+
+  function readInbox(): Record<string, { sid: string; pid: number; text: string; receiptMsgId?: string }> {
+    try {
+      return JSON.parse(readFileSync(join(stateDir(), 'feishu-notify-inbox.json'), 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  it('目标 session 在另一存活进程 → 写收件箱转发，不误报「会话已结束」', async () => {
+    const otherPid = child?.pid as number;
+    const { mockClient, pi, sub } = await setupLocalSession();
+    // 目标 session 注册在另一个存活进程
+    writeRegistry({
+      'session-target': { pid: otherPid, cwd: '/tmp/pi-fn-it/other', startedAt: new Date().toISOString() },
+    });
+    writeRouter({ om_notify_fwd: { sid: 'session-target', ts: Date.now() } });
+
+    sub({
+      messageId: 'om_reply_fwd', chatId: 'oc_1', chatType: 'p2p', senderId: 'ou_1', senderName: '张三',
+      content: '继续', rawContentType: 'text', mentionedBot: false, mentionAll: false,
+      replyToMessageId: 'om_notify_fwd', rootId: '', threadId: '', createTime: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    // 未本地注入
+    expect((pi.sendUserMessage as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    // 收件箱里有转发条目：目标 sid/pid 正确
+    const box = readInbox();
+    expect(box['om_reply_fwd']?.sid).toBe('session-target');
+    expect(box['om_reply_fwd']?.pid).toBe(otherPid);
+    expect(box['om_reply_fwd']?.text).toBe('继续');
+    // 回执是「正在转达」，不是「会话已结束」
+    const sentText = String(mockClient.sendText.mock.calls[0]?.[0] ?? '');
+    expect(sentText).toContain('转达');
+    expect(sentText).not.toContain('已结束');
+  });
+
+  it('收件箱条目被目标进程取回 → 本地回注并接管转发方回执', async () => {
+    const { mockClient, pi } = await setupLocalSession();
+
+    const { Inbox } = await import('../src/inbox.js');
+    new Inbox().enqueue({
+      id: 'om_in_1',
+      sid: 'session-test-1',
+      pid: process.pid,
+      text: '继续',
+      senderName: '张三',
+      receiptMsgId: 'rcpt-fwd',
+      ts: Date.now(),
+    });
+
+    await vi.waitFor(() => expect(pi.sendUserMessage).toHaveBeenCalled(), { timeout: 2000 });
+
+    const prompt = String((pi.sendUserMessage as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] ?? '');
+    expect(prompt).toContain('继续');
+    // 转发方的回执被原地接管（updateText），不再另发「已收到」
+    expect(mockClient.updateText).toHaveBeenCalledWith('rcpt-fwd', expect.stringContaining('已收到'));
+  });
+
+  it('收件箱条目无处投递 → 把转发方回执刷成「会话已结束」', async () => {
+    const { mockClient } = await setupLocalSession();
+
+    const { Inbox } = await import('../src/inbox.js');
+    new Inbox().enqueue({
+      id: 'om_in_2',
+      sid: 'session-dead',
+      pid: process.pid,
+      text: '继续',
+      receiptMsgId: 'rcpt-x',
+      locale: 'zh',
+      ts: Date.now(),
+    });
+
+    await vi.waitFor(() => expect(mockClient.updateText).toHaveBeenCalled(), { timeout: 2000 });
+    expect(mockClient.updateText).toHaveBeenCalledWith('rcpt-x', expect.stringContaining('已结束'));
+  });
+
+  it('目标进程已退出且无同项目会话 → 回执「会话已结束」且不写收件箱', async () => {
+    const { mockClient, pi, sub } = await setupLocalSession();
+    writeRegistry({
+      'session-dead': { pid: 2147483647, cwd: '/tmp/pi-fn-it/other', startedAt: new Date().toISOString() },
+    });
+    writeRouter({ om_notify_dead: { sid: 'session-dead', ts: Date.now() } });
+
+    sub({
+      messageId: 'om_reply_dead', chatId: 'oc_1', chatType: 'p2p', senderId: 'ou_1', senderName: '张三',
+      content: '继续', rawContentType: 'text', mentionedBot: false, mentionAll: false,
+      replyToMessageId: 'om_notify_dead', rootId: '', threadId: '', createTime: Date.now(),
+    });
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect((pi.sendUserMessage as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
+    expect(readInbox()['om_reply_dead']).toBeUndefined();
+    const sentText = String(mockClient.sendText.mock.calls[0]?.[0] ?? '');
+    expect(sentText).toContain('已结束');
   });
 });

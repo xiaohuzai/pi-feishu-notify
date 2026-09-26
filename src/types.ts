@@ -103,3 +103,38 @@ export interface ClaimEntry {
   sid: string;
   ts: number;
 }
+
+/**
+ * 跨进程回注收件箱条目。
+ *
+ * 飞书长连接是集群投递（一条事件只随机到达一个 client），回复通知的消息可能
+ * 落在非目标 session 所在的 pi 进程上。收到事件的进程把指令写进收件箱，
+ * 目标进程（pid）轮询取回后本地回注——pi.sendUserMessage 只能注入本进程会话。
+ */
+export interface InboxEntry {
+  /** 幂等 id（用飞书回复消息的 message_id，重复转发覆盖同一条） */
+  id: string;
+  /** 目标 session id */
+  sid: string;
+  /** 目标 session 所在 pi 进程的 pid */
+  pid: number;
+  /** 注入指令文本 */
+  text: string;
+  /** 回复者昵称（注入 prompt 用） */
+  senderName?: string;
+  /** 目标会话的项目目录（会话消失时做同项目回退判断） */
+  cwd?: string;
+  /** 转发方已发「正在转达」回执的 message_id（目标进程接管进度刷新用） */
+  receiptMsgId?: string;
+  /** 回执开关（转发方配置的快照；目标会话无处投递时决定是否补发告知） */
+  receipt?: boolean;
+  /** 回执语言（转发方解析好的，目标进程未必有该会话的配置） */
+  locale?: 'en' | 'zh';
+  /** 已转发跳数（防同项目回退在多进程间来回转发） */
+  hops?: number;
+  /** 回复来源（目标会话无处投递时告知用户用） */
+  replyChatId?: string;
+  replySenderId?: string;
+  replyChatType?: string;
+  ts: number;
+}

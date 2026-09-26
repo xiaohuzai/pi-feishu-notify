@@ -18,7 +18,7 @@
 - ✅ **Markdown formatting**: notifications render as Feishu rich text (`post`) with clean titles, bold, code blocks, and quotes
 - ✅ **Final result only**: follow-up replies send only the filtered final result (markdown notification) — thinking/tool-call content never reaches Feishu
 - ✅ **Progress feedback**: long tasks refresh an elapsed-time progress line (plus project/session) in place on the receipt, so you never wait blindly
-- ✅ **Cross-process dedup**: the same message is processed only once across multiple pi processes
+- ✅ **Cross-process dedup & delivery**: the same message is processed only once across multiple pi processes; if the WS event lands on a different pi process than the one owning the target session, the command is relayed via a local inbox so the right session still gets it
 - ✅ **Crash self-healing**: automatically cleans up residual state from dead processes
 - ✅ **Flexible config**: global + project-level overrides, environment variable interpolation, auto-detect `userId`/`chatId`
 - ✅ **i18n**: English-first by default; Chinese is automatic in `zh_*` environments, or force it via `locale`
@@ -118,7 +118,7 @@ Start pi after configuring (or `/reload`) — the extension activates automatica
 
 2. **Reply to command**: in Feishu, just **reply** to the notification with your instruction (no need to @ the bot). The message is injected into the corresponding pi session to continue, and you'll receive a new notification when it finishes.
    - **Group replies**: replies are accepted as long as the group is the "notification target `chatId`", the "`allowedChatIds` whitelist", or an "auto-detected group" (with `requireMention: false`, no @bot needed).
-   - **Injection survives restarts**: pi generates a new session id after restart, but the reply automatically falls back to the current session in the same project (same cwd) to continue — no more "session ended" dead-ends due to an old session id mismatch.
+   - **Injection survives restarts & processes**: pi generates a new session id after restart, but the reply automatically falls back to a live session in the same project (same cwd) — in this process or any other pi process — to continue. No more "session ended" dead-ends due to an old session id mismatch.
 
 3. **Manual notification**: run `/feishu-notify <message>` in pi to send a notification to Feishu manually; `/feishu-notify` with no args shows extension status (muted state, min duration threshold, auto-detected userId).
 
@@ -144,6 +144,19 @@ Start pi after configuring (or `/reload`) — the extension activates automatica
 - **Upstream**: the SDK long connection receives a message → if `replyToMessageId` hits the routing table → cross-process dedup claim → `pi.sendUserMessage` injects the command
 - **Resident singleton**: the WebSocket consumer is a process-level singleton shared across sessions, and doesn't drop when sessions switch
 - **Dedup**: `~/.pi/agent/feishu-notify-dedup.json` records processed messages with cross-process mutual exclusion
+
+### Multiple pi processes
+
+The Feishu long connection is **cluster-delivery**: when several clients of the same app are connected, each event is delivered to exactly **one** of them at random. So if you run multiple pi processes (e.g. two terminals in different projects), a reply may be received by a process other than the one owning the target session. This extension handles that:
+
+- The process that receives the reply looks up the target session in the session registry (pid + cwd). If the session lives in **another live process**, the command is written to `~/.pi/agent/feishu-notify-inbox.json` and the receipt says "handing it to the pi process that owns this session" — the owning process polls the inbox (default every 1s) and injects it there, seamlessly taking over the receipt's progress updates.
+- If the target session has ended, it falls back to a live session in the **same project** (same cwd) — across processes — before reporting "session ended".
+- If the owning process never picks up the command (e.g. it's frozen), the receipt is updated to say so after ~30s, instead of silently doing nothing.
+
+Notes:
+
+- This works as long as all pi processes run a version of `pi-feishu-notify` with inbox support; an inbox entry that is never picked up expires automatically.
+- Everything is plain state files with directory locks under `~/.pi/agent/` — no daemon, no network beyond Feishu itself.
 
 ## Markdown formatting & reply behavior
 
@@ -205,6 +218,7 @@ pi-feishu-notify/
 │   ├── config.ts            # config loading (global + project + env interpolation + legacy migration)
 │   ├── feishu.ts            # Feishu SDK client (send + long connection, process-level singleton)
 │   ├── router.ts            # notification routing + cross-process dedup
+│   ├── inbox.ts             # cross-process command relay (delivery decision + inbox)
 │   ├── sessions.ts          # session registry (crash self-healing)
 │   ├── filter.ts            # send/log filtering (minDurationMs, logLevel)
 │   ├── notify.ts            # notification content building (markdown formatting + reply text extraction)
