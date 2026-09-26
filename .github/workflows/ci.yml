@@ -4,10 +4,17 @@ on:
   push:
     branches: [main, dev]
   pull_request:
+  # 发版的版本号 PR 带 [skip ci]（pull_request 不会自动跑），由 release 工作流
+  # 显式 dispatch 本工作流在 release 分支上跑，产出 main ruleset 所需的 Test 检查
+  workflow_dispatch:
 
 jobs:
   test:
+    # job 名即 check 上下文名——main ruleset 的 required_status_checks 按 "Test" 匹配
+    name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - uses: actions/checkout@v4
 
