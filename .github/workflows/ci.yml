@@ -7,7 +7,8 @@ on:
 
 jobs:
   test:
-    # job 名即 check 上下文名——main ruleset 的 required_status_checks 按 "Test" 匹配
+    # job 名即 check 上下文名——main ruleset 的 required_status_checks 按 "Test" 匹配。
+    # job 始终运行并给出结论（内部步骤可跳过）：整体跳过 job 会让必需检查无结论，PR 合不了。
     name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -20,10 +21,49 @@ jobs:
           node-version: 20
           cache: npm
 
+      # npm ci 永远现场跑：秒级（setup-node 已缓存下载），且装不上依赖要立刻暴露
       - run: npm ci
 
+      # ── 验证结果复用（参考 browsa「全量测试结果按内容树复用」）────────
+      # 同一内容树 + 同一环境 = 验证结果可转移（npm ci + lockfile 钉死依赖、
+      # Node 20 钉死环境）。缓存键用**树哈希**而非 commit SHA——squash / merge
+      # 合并换 SHA 不换树，同一份内容重复触发 CI（重跑、推送 dev 又开 PR、
+      # 合并后再推 main）不再重复跑全量；revert 回旧内容也能命中最初记录。
+      # 键带 OS/Node 前缀，环境一变自然失效。
+      # 只缓存最贵的 typecheck + npm test；命中即视为「这份内容在本环境验证过一次」。
+      - name: Compute tree hash
+        id: tree
+        run: echo "hash=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Lookup previous verify result
+        id: verifycache
+        continue-on-error: true # 缓存服务抖动时降级为现场全量跑，不阻塞合并
+        uses: actions/cache/restore@v4
+        with:
+          path: .verify-pass
+          key: verify-${{ runner.os }}-node20-${{ steps.tree.outputs.hash }}
+          lookup-only: true
+
+      - name: Reuse verify result
+        if: steps.verifycache.outputs.cache-hit == 'true'
+        run: echo "::notice::typecheck + 测试结果复用自同树同环境的既有记录（tree ${{ steps.tree.outputs.hash }}）——语义=这份内容在本环境完整验证过一次"
+
       - name: Typecheck
+        if: steps.verifycache.outputs.cache-hit != 'true'
         run: npm run typecheck
 
       - name: Test
+        if: steps.verifycache.outputs.cache-hit != 'true'
         run: npm test
+
+      - name: Record verify result
+        if: steps.verifycache.outputs.cache-hit != 'true' && success()
+        run: echo "passed by ${{ github.sha }} at $(date -u +%FT%TZ)" > .verify-pass
+
+      - name: Save verify result
+        if: steps.verifycache.outputs.cache-hit != 'true' && success()
+        continue-on-error: true # 存不下（额度满/服务抖动）不影响绿灯
+        uses: actions/cache/save@v4
+        with:
+          path: .verify-pass
+          key: verify-${{ runner.os }}-node20-${{ steps.tree.outputs.hash }}

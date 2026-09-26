@@ -61,8 +61,44 @@ jobs:
             exit 1
           fi
 
+      # ── 验证结果复用（参考 browsa，与 ci.yml 同一缓存空间）──────────
+      # 验证步虽在版本 bump 之后，但 bump 当时尚未提交——HEAD^{tree} 读的是
+      # 已提交树 = 这次要发的内容树（CI 刚全量测过的那份）。命中即复用，
+      # 发版不再重复跑全量；未命中（首发新树/缓存过期）照常全量并回填记录。
+      # 版本号变更不进树哈希的前提：bump 只改 package.json/lock 的 version 字段，
+      # 不影响测试结果；发布的内容 = 已验证树 + 仅版本号差异。
+      - name: Compute tree hash
+        id: tree
+        run: echo "hash=$(git rev-parse 'HEAD^{tree}')" >> "$GITHUB_OUTPUT"
+
+      - name: Lookup previous verify result
+        id: verifycache
+        continue-on-error: true # 缓存服务抖动时降级为现场全量跑，不阻塞发版
+        uses: actions/cache/restore@v4
+        with:
+          path: .verify-pass
+          key: verify-${{ runner.os }}-node20-${{ steps.tree.outputs.hash }}
+          lookup-only: true
+
+      - name: Reuse verify result
+        if: steps.verifycache.outputs.cache-hit == 'true'
+        run: echo "::notice::typecheck + 测试结果复用自同树同环境的既有记录（tree ${{ steps.tree.outputs.hash }}）——版本号变更不影响测试，发版不再重复跑"
+
       - name: Verify (typecheck + test)
+        if: steps.verifycache.outputs.cache-hit != 'true'
         run: npm run typecheck && npm test
+
+      - name: Record verify result
+        if: steps.verifycache.outputs.cache-hit != 'true' && success()
+        run: echo "passed by ${{ github.sha }} at $(date -u +%FT%TZ)" > .verify-pass
+
+      - name: Save verify result
+        if: steps.verifycache.outputs.cache-hit != 'true' && success()
+        continue-on-error: true # 存不下（额度满/服务抖动）不影响发版
+        uses: actions/cache/save@v4
+        with:
+          path: .verify-pass
+          key: verify-${{ runner.os }}-node20-${{ steps.tree.outputs.hash }}
 
       - name: Publish to npm
         # 该版本已在 npm 上（重跑 / 补 tag 场景）则跳过，保证 workflow 可安全重跑
