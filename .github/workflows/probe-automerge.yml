@@ -9,10 +9,12 @@ permissions:
 
 jobs:
   probe:
+    # 防递归：只在探针自己的 PR 上跑，probe PR（probe/head-*）不触发
+    if: github.head_ref == 'test/probe-automerge'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Probe GITHUB_TOKEN PR create + merge (auto-merge with direct fallback)
+      - name: Probe direct-merge fallback (auto-merge refused on clean PR)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -24,12 +26,13 @@ jobs:
           HEAD="probe/head-$RUN_ID"
           git fetch origin "$BASE"
           git checkout -B "$HEAD" "origin/$BASE"
-          echo "probe" > probe-automerge.txt
+          echo "probe fallback" > probe-automerge.txt
           git add probe-automerge.txt
-          git commit -m "probe: auto-merge test"
+          git commit -m "probe: direct merge fallback test"
           git push origin "$HEAD"
-          PR_URL=$(gh pr create --base "$BASE" --head "$HEAD" --title "probe: auto-merge test (safe to ignore)" --body "Automated probe for release workflow merge strategy.")
+          PR_URL=$(gh pr create --base "$BASE" --head "$HEAD" --title "probe: direct merge fallback (safe to ignore)" --body "Automated probe for release workflow merge fallback.")
           echo "probe PR: $PR_URL"
+          # 与 release.yml 相同的策略：auto-merge 优先，失败（clean status）则直接合并
           if gh pr merge "$PR_URL" --auto --merge --delete-branch; then
             echo "Auto-merge enabled for $PR_URL"
           else
