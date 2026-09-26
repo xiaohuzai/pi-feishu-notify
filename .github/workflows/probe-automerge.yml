@@ -1,0 +1,47 @@
+name: Probe Auto-Merge
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Probe GITHUB_TOKEN can create PR and auto-merge it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -x
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          RUN_ID="${{ github.run_id }}"
+          BASE="probe/base-$RUN_ID"
+          HEAD="probe/head-$RUN_ID"
+          git checkout -b "$BASE"
+          git checkout -b "$HEAD"
+          echo "probe" > probe-automerge.txt
+          git add probe-automerge.txt
+          git commit -m "probe: auto-merge test"
+          git push origin "$BASE" "$HEAD"
+          PR_URL=$(gh pr create --base "$BASE" --head "$HEAD" --title "probe: auto-merge test (safe to ignore)" --body "Automated probe: GITHUB_TOKEN creates this PR and enables auto-merge on it.")
+          echo "probe PR: $PR_URL"
+          gh pr merge "$PR_URL" --auto --merge --delete-branch
+          STATE=""
+          for i in $(seq 1 12); do
+            STATE=$(gh pr view "$PR_URL" --json state --jq .state)
+            echo "state=$STATE"
+            [ "$STATE" = "MERGED" ] && break
+            sleep 5
+          done
+          gh pr view "$PR_URL" --json state,url --jq '.state + " " + .url'
+          if [ "$STATE" != "MERGED" ]; then
+            echo "::error::auto-merge probe did not merge (state=$STATE)"
+            exit 1
+          fi
+          git push origin --delete "$BASE"
+          echo "PROBE OK"
