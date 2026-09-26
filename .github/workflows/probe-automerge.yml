@@ -20,14 +20,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           RUN_ID="${{ github.run_id }}"
-          BASE="probe/base-$RUN_ID"
+          BASE="probe-target"
           HEAD="probe/head-$RUN_ID"
-          git checkout -b "$BASE"
-          git checkout -b "$HEAD"
+          git fetch origin "$BASE"
+          git checkout -B "$HEAD" "origin/$BASE"
           echo "probe" > probe-automerge.txt
           git add probe-automerge.txt
           git commit -m "probe: auto-merge test"
-          git push origin "$BASE" "$HEAD"
+          git push origin "$HEAD"
           PR_URL=$(gh pr create --base "$BASE" --head "$HEAD" --title "probe: auto-merge test (safe to ignore)" --body "Automated probe: GITHUB_TOKEN creates this PR and enables auto-merge on it.")
           echo "probe PR: $PR_URL"
           gh pr merge "$PR_URL" --auto --merge --delete-branch
@@ -43,5 +43,4 @@ jobs:
             echo "::error::auto-merge probe did not merge (state=$STATE)"
             exit 1
           fi
-          git push origin --delete "$BASE"
           echo "PROBE OK"
