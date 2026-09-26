@@ -1,0 +1,59 @@
+name: Probe Release Chain
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+  actions: write
+
+jobs:
+  probe:
+    # 防递归：只在探针自己的 PR 上跑
+    if: github.head_ref == 'test/probe-release-chain'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Simulate release version-PR chain ([skip ci] + dispatch CI + auto-merge)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -x
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          RUN_ID="${{ github.run_id }}"
+          BASE="probe-target"
+          HEAD="probe/release-sim-$RUN_ID"
+          git fetch origin "$BASE"
+          git checkout -B "$HEAD" "origin/$BASE"
+          # 模拟版本号提交（带 [skip ci]，pull_request CI 会被跳过——必须靠 dispatch）
+          node -e "const f='package.json';const p=require('./'+f);p.version='0.0.0-probe';require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+          git add package.json
+          git commit -m "chore: release v0.0.0-probe [skip ci]"
+          git push origin "$HEAD"
+          PR_URL=$(gh pr create --base "$BASE" --head "$HEAD" --title "probe: release version PR (safe to ignore)" --body "Automated probe: [skip ci] commit + dispatched CI + auto-merge through the Test gate.")
+          echo "probe PR: $PR_URL"
+          # 与 release.yml 相同：显式 dispatch ci.yml 产出必需检查（workflow_dispatch 不受 [skip ci] 影响）
+          gh workflow run ci.yml --ref "$HEAD"
+          gh pr merge "$PR_URL" --auto --merge --delete-branch
+          STATE=""
+          for i in $(seq 1 36); do
+            STATE=$(gh pr view "$PR_URL" --json state --jq .state)
+            echo "state=$STATE"
+            [ "$STATE" = "MERGED" ] && break
+            if gh pr checks "$PR_URL" 2>/dev/null | grep -qw fail; then
+              echo "::error::Test check FAILED on version PR"
+              gh pr checks "$PR_URL" || true
+              exit 1
+            fi
+            sleep 5
+          done
+          gh pr view "$PR_URL" --json state,url --jq '.state + " " + .url'
+          if [ "$STATE" != "MERGED" ]; then
+            echo "::error::version PR did not merge (state=$STATE)"
+            gh pr checks "$PR_URL" || true
+            exit 1
+          fi
+          echo "PROBE OK"
