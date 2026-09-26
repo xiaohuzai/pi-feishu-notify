@@ -40,14 +40,6 @@ jobs:
           # --allow-same-version：输入版本 == 当前版本时 npm version 会报 "Version not changed" 并退出 1，
           # 加此选项让流程继续（适用重跑 / main 已把版本号写好、只需发布 + 打 tag 的场景）
           if [ -n "$VERSION_INPUT" ]; then
-            # 防呆：新版本必须 >= npm 已发布的 latest。更低的版本会让 npm 把 latest 标签指回旧版
-            # （等于 latest 是合法的：视为重跑，走幂等补 tag/PR 路径，不重复发布）
-            NPM_LATEST=$(npm view pi-feishu-notify version 2>/dev/null || echo "0.0.0")
-            LOWEST=$(printf '%s\n%s\n' "$NPM_LATEST" "$VERSION_INPUT" | sort -V | head -n 1)
-            if [ "$LOWEST" = "$VERSION_INPUT" ] && [ "$VERSION_INPUT" != "$NPM_LATEST" ]; then
-              echo "::error::Version $VERSION_INPUT is lower than the published latest ($NPM_LATEST) — 发旧版本会把 npm latest 标签指回旧版"
-              exit 1
-            fi
             npm version "$VERSION_INPUT" --no-git-tag-version --allow-same-version
           fi
           # 注意：不要在 $( ) 内用 \" 转义双引号，bash 会把它当字面量导致语法错误
@@ -57,8 +49,15 @@ jobs:
           if npm view "pi-feishu-notify@$VERSION" version >/dev/null 2>&1; then
             echo "exists_on_npm=true" >> "$GITHUB_OUTPUT"
             echo "Version $VERSION already exists on npm — will skip publish (idempotent re-run)"
-          else
-            echo "exists_on_npm=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "exists_on_npm=false" >> "$GITHUB_OUTPUT"
+          # 防呆：未发布的新版本必须高于 npm latest。发旧版本会让 npm 把 latest 标签指回旧版
+          NPM_LATEST=$(npm view pi-feishu-notify version 2>/dev/null || echo "0.0.0")
+          LOWEST=$(printf '%s\n%s\n' "$NPM_LATEST" "$VERSION" | sort -V | head -n 1)
+          if [ "$LOWEST" = "$VERSION" ]; then
+            echo "::error::Version $VERSION is not higher than the published latest ($NPM_LATEST) — 发旧版本会把 npm latest 标签指回旧版"
+            exit 1
           fi
 
       - name: Verify (typecheck + test)
