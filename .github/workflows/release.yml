@@ -142,8 +142,16 @@ jobs:
             echo "::error::PR $PR_URL 除版本号外还有其它变更，已停止自动合并，请人工审查"
             exit 1
           fi
-          gh pr merge "$PR_URL" --auto --merge --delete-branch
-          # auto-merge 是异步的（等规则满足后由 GitHub 合入）；轮询确认，卡住就报错不装死
+          # 先试 auto-merge（分支规则要求的检查/审批未满足时由 GitHub 择机合入）；
+          # 若 PR 已就绪（如 main 当前无必需检查），GitHub 会拒绝对就绪 PR 开 auto-merge
+          # （"Pull request is in clean status"），此时直接合并即可。
+          if gh pr merge "$PR_URL" --auto --merge --delete-branch; then
+            echo "Auto-merge enabled for $PR_URL"
+          else
+            echo "Auto-merge not applicable (PR already mergeable), merging directly"
+            gh pr merge "$PR_URL" --merge --delete-branch
+          fi
+          # 轮询确认已合入（auto-merge 是异步的）；卡住就报错不装死
           for i in $(seq 1 12); do
             STATE=$(gh pr view "$PR_URL" --json state --jq .state)
             if [ "$STATE" = "MERGED" ]; then
