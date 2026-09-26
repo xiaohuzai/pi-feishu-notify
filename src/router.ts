@@ -9,7 +9,7 @@
  */
 import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { stateDir, mutateJson, readJson, withDirLock } from './state.js';
+import { stateDir, mutateJson, readJson, withDirLock, pruneByAge } from './state.js';
 import type { ClaimEntry, NotificationRecord } from './types.js';
 
 export type NotificationMap = Record<string, NotificationRecord>;
@@ -29,17 +29,6 @@ function routerLockDir(): string {
 }
 function dedupLockDir(): string {
   return join(stateDir(), 'feishu-notify-dedup.lock');
-}
-
-/** 清理超过 maxAgeMs 的记录。 */
-function pruneByAge<T extends { ts: number }>(
-  map: Record<string, T>,
-  maxAgeMs: number,
-): void {
-  const cutoff = Date.now() - maxAgeMs;
-  for (const k of Object.keys(map)) {
-    if (map[k] && map[k].ts < cutoff) delete map[k];
-  }
 }
 
 /** 保留天数（staleDays）→ 毫秒；未配置或非法时默认 7 天。 */

@@ -29,6 +29,10 @@ export interface I18nMessages {
     received: string;
     /** 会话已结束，无法回注 */
     sessionGone: string;
+    /** 目标会话在另一个 pi 进程，已转发 */
+    forwarded: string;
+    /** 转发后目标 pi 进程迟迟未取走指令 */
+    forwardStalled: string;
     /** 转达失败 */
     relayFailed: string;
     /** 处理中进度（带已用时秒数） */
@@ -89,7 +93,9 @@ const en: I18nMessages = {
   },
   receipt: {
     received: 'Received your reply, processing…',
-    sessionGone: 'This pi session has ended and can no longer receive commands. Please start a new task in a new session.',
+    sessionGone: 'This pi session has ended and can no longer receive commands (no live session found for this project in any pi process). Please start a new task in a new session.',
+    forwarded: 'Got your reply — handing it to another pi process that owns this session; it will start shortly.',
+    forwardStalled: 'Still waiting for the pi process that owns this session to pick up the command — if nothing happens, check that pi window.',
     relayFailed: 'Failed to relay: ',
     progress: '⏳ Still working… {{seconds}}s elapsed — project: {{project}} / session: {{sid}}',
     done: '✅ Done — see the result in the next message.',
@@ -145,7 +151,9 @@ const zh: I18nMessages = {
   },
   receipt: {
     received: '已收到你的回复，正在处理…',
-    sessionGone: '该 pi 会话已结束，无法回注指令。请在新会话中重新发起任务。',
+    sessionGone: '该 pi 会话已结束，无法回注指令（所有 pi 进程中都没有该项目的存活会话）。请在新会话中重新发起任务。',
+    forwarded: '已收到你的回复，正在转达给该会话所在的另一个 pi 进程，即将开始处理。',
+    forwardStalled: '仍在等待该会话所在的 pi 进程取走指令——若长时间没反应，请检查对应 pi 窗口。',
     relayFailed: '转达失败：',
     progress: '⏳ 仍在处理中，已用时 {{seconds}}s… 项目「{{project}}」/ 会话 {{sid}}',
     done: '✅ 处理完成，结果见下一条消息。',
