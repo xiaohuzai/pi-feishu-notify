@@ -11,10 +11,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -142,23 +144,37 @@ jobs:
             echo "::error::PR $PR_URL 除版本号外还有其它变更，已停止自动合并，请人工审查"
             exit 1
           fi
-          # 先试 auto-merge（分支规则要求的检查/审批未满足时由 GitHub 择机合入）；
-          # 若 PR 已就绪（如 main 当前无必需检查），GitHub 会拒绝对就绪 PR 开 auto-merge
-          # （"Pull request is in clean status"），此时直接合并即可。
-          if gh pr merge "$PR_URL" --auto --merge --delete-branch; then
-            echo "Auto-merge enabled for $PR_URL"
-          else
-            echo "Auto-merge not applicable (PR already mergeable), merging directly"
-            gh pr merge "$PR_URL" --merge --delete-branch
-          fi
-          # 轮询确认已合入（auto-merge 是异步的）；卡住就报错不装死
-          for i in $(seq 1 12); do
+          # 版本提交带 [skip ci]，PR 不会自动跑 CI；而 main ruleset 要求 Test 必需检查——
+          # 显式 dispatch 该检查（workflow_dispatch 不受 [skip ci] 影响），门禁才有得过
+          gh workflow run ci.yml --ref "$RELEASE_BRANCH" \
+            || { echo "::error::触发 CI 失败，无法自动合入。npm $VERSION 已发布成功，请手动处理：$PR_URL"; exit 1; }
+
+          # auto-merge：有必需检查在跑时 --auto 可用，GitHub 在 Test 通过后自动合入；
+          # 若 PR 已就绪（检查已过），--auto 被拒（clean status）→ 直接合并兜底
+          AUTO=0
+          for i in $(seq 1 60); do
             STATE=$(gh pr view "$PR_URL" --json state --jq .state)
             if [ "$STATE" = "MERGED" ]; then
               echo "Version bump PR merged automatically: $PR_URL"
               exit 0
             fi
+            if [ "$AUTO" = 0 ]; then
+              if gh pr merge "$PR_URL" --auto --merge --delete-branch >/dev/null 2>&1; then
+                AUTO=1
+                echo "Auto-merge enabled for $PR_URL"
+              else
+                gh pr merge "$PR_URL" --merge --delete-branch >/dev/null 2>&1 \
+                  && { echo "Version bump PR merged directly: $PR_URL"; exit 0; }
+              fi
+            fi
+            # 检查失败则提前报错（auto-merge 永远不会完成），不装死
+            if gh pr checks "$PR_URL" 2>/dev/null | grep -qw fail; then
+              echo "::error::CI 检查未通过，版本号 PR 无法自动合入。npm $VERSION 已发布成功，请修复后手动合并：$PR_URL"
+              gh pr checks "$PR_URL" || true
+              exit 1
+            fi
             sleep 5
           done
           echo "::error::版本号 PR 未自动合入（state=$STATE）。npm $VERSION 已发布成功，请手动合并：$PR_URL"
+          gh pr checks "$PR_URL" || true
           exit 1
