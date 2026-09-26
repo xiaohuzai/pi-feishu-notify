@@ -38,19 +38,25 @@ jobs:
         run: |
           # 输入了版本号则 bump，否则用当前 package.json 版本
           # --allow-same-version：输入版本 == 当前版本时 npm version 会报 "Version not changed" 并退出 1，
-          # 加此选项让流程继续（适用 main 已把版本号写好、只需发布 + 打 tag 的场景）
+          # 加此选项让流程继续（适用重跑 / main 已把版本号写好、只需发布 + 打 tag 的场景）
           if [ -n "$VERSION_INPUT" ]; then
             npm version "$VERSION_INPUT" --no-git-tag-version --allow-same-version
           fi
           # 注意：不要在 $( ) 内用 \" 转义双引号，bash 会把它当字面量导致语法错误
           VERSION=$(node -p "require('./package.json').version")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Check if version already exists on npm
-        run: |
-          VERSION=${{ steps.check.outputs.version }}
-          if npm view pi-feishu-notify@$VERSION version >/dev/null 2>&1; then
-            echo "::error::Version $VERSION already exists on npm, pick a different version"
+          # 已发布过的版本跳过 publish（失败重跑安全：npm 版本号不可覆盖，重跑只补 tag / 版本号 PR）
+          if npm view "pi-feishu-notify@$VERSION" version >/dev/null 2>&1; then
+            echo "exists_on_npm=true" >> "$GITHUB_OUTPUT"
+            echo "Version $VERSION already exists on npm — will skip publish (idempotent re-run)"
+            exit 0
+          fi
+          echo "exists_on_npm=false" >> "$GITHUB_OUTPUT"
+          # 防呆：未发布的新版本必须高于 npm latest。发旧版本会让 npm 把 latest 标签指回旧版
+          NPM_LATEST=$(npm view pi-feishu-notify version 2>/dev/null || echo "0.0.0")
+          LOWEST=$(printf '%s\n%s\n' "$NPM_LATEST" "$VERSION" | sort -V | head -n 1)
+          if [ "$LOWEST" = "$VERSION" ]; then
+            echo "::error::Version $VERSION is not higher than the published latest ($NPM_LATEST) — 发旧版本会把 npm latest 标签指回旧版"
             exit 1
           fi
 
@@ -58,41 +64,49 @@ jobs:
         run: npm run typecheck && npm test
 
       - name: Publish to npm
+        # 该版本已在 npm 上（重跑 / 补 tag 场景）则跳过，保证 workflow 可安全重跑
+        if: steps.check.outputs.exists_on_npm != 'true'
         run: npm publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Commit version bump and tag
+        id: bump
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          RELEASE_BRANCH="release/v$VERSION"
           # 先提交版本号变更，再打 tag，保证 tag 指向真正发布的提交
           git add package.json package-lock.json
+          PR_NEEDED=false
           if git diff --cached --quiet; then
-            echo "No version change, skipping commit and PR"
-            git tag v${{ steps.check.outputs.version }}
-            git push origin v${{ steps.check.outputs.version }}
-            exit 0
+            echo "No version change, skipping commit"
+          else
+            git commit -m "chore: release v$VERSION [skip ci]"
+            PR_NEEDED=true
           fi
-          git commit -m "chore: release v${{ steps.check.outputs.version }} [skip ci]"
-          git tag v${{ steps.check.outputs.version }}
-          git push origin v${{ steps.check.outputs.version }}
-          # main 有 pull_request 规则，不能直推，改走 PR
-          RELEASE_BRANCH="release/v${{ steps.check.outputs.version }}"
-          git branch -f "$RELEASE_BRANCH"
-          git push origin "$RELEASE_BRANCH"
-          gh pr create --base main --head "$RELEASE_BRANCH" \
-            --title "chore: release v${{ steps.check.outputs.version }}" \
-            --body "Created automatically by the Release workflow: updates package.json / package-lock.json versions. Please review and merge." || echo "PR creation failed or already exists, please check manually"
+          # tag / release 分支都做成幂等：重跑时已存在则复用，不报错
+          if git ls-remote --tags origin "refs/tags/v$VERSION" | grep -q .; then
+            echo "Tag v$VERSION already exists on remote, reusing"
+          else
+            git tag "v$VERSION"
+            git push origin "v$VERSION"
+          fi
+          if [ "$PR_NEEDED" = "true" ]; then
+            # main 有 pull_request 规则，不能直推，改走 PR；release/* 是 bot 分支，允许强推以保证重跑收敛
+            git push origin "HEAD:refs/heads/$RELEASE_BRANCH" --force
+          fi
+          echo "pr_needed=$PR_NEEDED" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
           # 基于刚 push 的 tag 建 Release，changelog 自动生成；重复运行时跳过已存在的 Release
-          VERSION=${{ steps.check.outputs.version }}
           if gh release view "v$VERSION" >/dev/null 2>&1; then
             echo "Release v$VERSION already exists, skipping"
             exit 0
@@ -100,3 +114,43 @@ jobs:
           gh release create "v$VERSION" \
             --title "v$VERSION" \
             --generate-notes
+
+      # 版本号 PR 自动建、自动合——仅对该 PR 开启 auto-merge（dev→main 等常规 PR 仍走人工）。
+      # 放在最后一步：前面 npm / tag / Release 都已落地，本步失败不影响已发布的产物。
+      - name: Open version bump PR and auto-merge
+        if: steps.bump.outputs.pr_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          RELEASE_BRANCH="release/v$VERSION"
+          PR_URL=$(gh pr list --base main --head "$RELEASE_BRANCH" --state open --json url --jq '.[0].url')
+          if [ -z "$PR_URL" ]; then
+            if gh pr list --base main --head "$RELEASE_BRANCH" --state merged --json number --jq '.[0].number' | grep -q '[0-9]'; then
+              echo "Version bump PR already merged, nothing to do."
+              exit 0
+            fi
+            PR_URL=$(gh pr create --base main --head "$RELEASE_BRANCH" \
+              --title "chore: release v$VERSION" \
+              --body "Created automatically by the Release workflow: updates package.json / package-lock.json versions. Auto-merged by the workflow (only version-only PRs are); no manual action needed.") \
+              || { echo "::error::Failed to create version bump PR for branch $RELEASE_BRANCH — 请手动创建并合并（npm $VERSION 已发布）"; exit 1; }
+          fi
+          echo "Version bump PR: $PR_URL"
+          # 安全阀：只自动合入「仅改版本号」的 PR，混入其它变更就停下交人工审查
+          EXTRA=$(gh pr diff "$PR_URL" --name-only | grep -cvE '^(package\.json|package-lock\.json)$' || true)
+          if [ "$EXTRA" -ne 0 ]; then
+            echo "::error::PR $PR_URL 除版本号外还有其它变更，已停止自动合并，请人工审查"
+            exit 1
+          fi
+          gh pr merge "$PR_URL" --auto --merge --delete-branch
+          # auto-merge 是异步的（等规则满足后由 GitHub 合入）；轮询确认，卡住就报错不装死
+          for i in $(seq 1 12); do
+            STATE=$(gh pr view "$PR_URL" --json state --jq .state)
+            if [ "$STATE" = "MERGED" ]; then
+              echo "Version bump PR merged automatically: $PR_URL"
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::版本号 PR 未自动合入（state=$STATE）。npm $VERSION 已发布成功，请手动合并：$PR_URL"
+          exit 1
