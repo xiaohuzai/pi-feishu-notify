@@ -111,6 +111,7 @@ jobs:
         id: bump
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
           VERSION: ${{ steps.check.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
@@ -122,9 +123,17 @@ jobs:
           if git diff --cached --quiet; then
             echo "No version change, skipping commit"
           else
-            # 刻意不带 [skip ci]：版本号 PR 要靠 pull_request CI 产出 main ruleset
-            # 所需的 Test 必需检查，门禁才过得去
-            git commit -m "chore: release v$VERSION"
+            # [skip ci] 按模式分流（2026-09-27 用户拍板：版本 PR 不跑 test）：
+            # - PAT 模式（secrets.RELEASE_PAT 已配）：bump 带 [skip ci]，版本号
+            #   PR 由 --admin 直接合并，不需要 CI 检查——发版 run 刚在同一份
+            #   内容树上跑过全量测试，版本 PR 的 test 是纯重复。
+            # - 无 PAT：不带 [skip ci]，PR 靠 pull_request CI 产出 Test 必需
+            #   检查，CI run 会停在 action_required 等管理员批准一次。
+            if [ -n "$RELEASE_PAT" ]; then
+              git commit -m "chore: release v$VERSION [skip ci]"
+            else
+              git commit -m "chore: release v$VERSION"
+            fi
             PR_NEEDED=true
           fi
           # tag / release 分支都做成幂等：重跑时已存在则复用，不报错
@@ -159,7 +168,8 @@ jobs:
       - name: Open version bump PR and auto-merge
         if: steps.bump.outputs.pr_needed == 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
+          RELEASE_PAT: ${{ secrets.RELEASE_PAT }}
           VERSION: ${{ steps.check.outputs.version }}
         run: |
           RELEASE_BRANCH="release/v$VERSION"
@@ -192,6 +202,14 @@ jobs:
             if [ "$STATE" = "MERGED" ]; then
               echo "Version bump PR merged automatically: $PR_URL"
               exit 0
+            fi
+            # PAT 模式直通：--admin 绕过必需检查与 up-to-date 直接合并（无 CI
+            # 即无批准问题）。github.token 非 admin 走不到，落回 auto-merge 循环。
+            if [ -n "$RELEASE_PAT" ]; then
+              if gh pr merge "$PR_URL" --merge --admin --delete-branch >/dev/null 2>&1; then
+                echo "Version bump PR merged (--admin bypass): $PR_URL"
+                exit 0
+              fi
             fi
             if [ "$AUTO" = 0 ]; then
               if gh pr merge "$PR_URL" --auto --merge --delete-branch >/dev/null 2>&1; then
