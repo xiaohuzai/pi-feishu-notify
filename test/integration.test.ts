@@ -233,6 +233,37 @@ describe('follow-up 回注：只发最终结果，不泄漏 thinking/toolUse', (
     expect(md).not.toContain('toolCall');
   });
 
+  it('同一条通知可多次回复注入（路由不因首次处理而删除）', async () => {
+    const mockClient = {
+      sendText: vi.fn(async () => ({ ok: true, messageId: 'rcpt-r' })),
+      sendMarkdown: vi.fn(async () => ({ ok: true, messageId: 'notify-r' })),
+      updateText: vi.fn(async () => true),
+      subscribe: vi.fn(() => () => {}),
+      close: vi.fn(),
+      isConnected: vi.fn(() => true),
+    };
+    const sendUserMessage = vi.fn(async () => {});
+    const { handlers } = setup(mockClient, sendUserMessage);
+    await handlers['session_start']?.({ type: 'session_start', reason: 'startup' }, makeCtx());
+
+    const { NotificationRouter } = await import('../src/router.js');
+    new NotificationRouter().record('om_notify_2', 'session-test-1');
+
+    const sub = (mockClient.subscribe as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as (msg: any) => void;
+    const reply = (id: string) =>
+      sub({
+        messageId: id, chatId: 'oc_1', chatType: 'p2p', senderId: 'ou_1', senderName: '张三',
+        content: '继续', rawContentType: 'text', mentionedBot: false, mentionAll: false,
+        replyToMessageId: 'om_notify_2', rootId: '', threadId: '', createTime: Date.now(),
+      });
+    reply('om_reply_a');
+    await new Promise((r) => setTimeout(r, 50));
+    reply('om_reply_b');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(2);
+  });
+
   it('不再注册流式事件处理器（message_start/update/end）', () => {
     const mockClient = {
       sendText: vi.fn(async () => ({ ok: true, messageId: 't1' })),

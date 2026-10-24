@@ -116,17 +116,17 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
   const muted = new Set<string>();
   // 自动识别的发送目标：用户在飞书给机器人发过消息后，这里会记录
   //  - discoveredUserId：最近一条 p2p 私聊的 senderId（open_id）
-  //  - discoveredChatIds：收到过消息的群 chatId → senderId 映射
+  //  - discoveredChatIds：收到过消息的群 chatId 集合
   // 同时持久化到 ~/.pi/agent/feishu-notify-discovered.json，重启后仍能提示绑定
   let discoveredUserId: string | undefined;
-  const discoveredChatIds = new Map<string, string>();
+  const discoveredChatIds = new Set<string>();
   let warnedAutoTarget = false;
   // 进程内一次性启动提示标记（/feishu-notify bind 提示只提示一次）
   let startupHintShown = false;
   {
     const st = loadDiscovered();
     discoveredUserId = st.userId;
-    for (const cid of st.chatIds) discoveredChatIds.set(cid, cid);
+    for (const cid of st.chatIds) discoveredChatIds.add(cid);
   }
   const router = new NotificationRouter();
   const dedup = new ClaimDedup();
@@ -226,7 +226,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
       discoveredUserId = msg.senderId;
     }
     if (!isP2p && msg.chatId && msg.senderId) {
-      discoveredChatIds.set(msg.chatId, msg.senderId);
+      discoveredChatIds.add(msg.chatId);
     }
     // 持久化识别结果（供下次启动提示 /feishu-notify bind）
     recordDiscovered(isP2p ? msg.senderId : undefined, isP2p ? undefined : msg.chatId);
@@ -248,7 +248,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
     if (!text) return;
 
     await deliverReply(targetSid, text, msg);
-    router.remove(msg.replyToMessageId ?? '');
+    // 保留路由记录：同一条通知可以继续回复多条指令（每次回复是新的 messageId，
+    // 跨进程去重按回复消息自身 id 防重，不会重复注入）；过期由 staleDays 清理。
   }
 
   /**
@@ -301,12 +302,8 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         senderName: msg.senderName,
         cwd: registry.get(targetSid)?.cwd,
         receiptMsgId,
-        receipt: cfg.receipt !== false,
         locale: resolveLocale(cfg.locale),
         hops: 1,
-        replyChatId: msg.chatId,
-        replySenderId: msg.senderId,
-        replyChatType: msg.chatType,
         ts: Date.now(),
       });
       sessionLog(targetSid)('reply-forwarded', {
@@ -618,9 +615,17 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
 
   pi.on('agent_settled', (_event, ctx) => {
     const { sid, cfg } = sessionInfo(ctx);
-    if (!cfg.enabled || !canSend(cfg)) return;
+    const t = messages(sessionLocale(sid));
 
-    // 只在空闲时通知（避免 stream 中打扰）
+    // enabled=false / 缺凭证的路径也必须停心跳、清任务时间戳：否则已启动的
+    // 进度心跳没有后续 settled 兜底，定时器会一直刷新（心跳可能由回复回注启动）
+    if (!cfg.enabled || !canSend(cfg)) {
+      taskStarts.delete(sid);
+      stopProgress(sid, t.receipt.doneOnly);
+      return;
+    }
+
+    // 只在空闲时通知（避免 stream 中打扰）；非空闲时保留心跳等下次 settled
     if (!ctx.isIdle()) return;
 
     // 静音 / 时长过滤
@@ -629,7 +634,6 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
 
     // 停掉 follow-up 的进度心跳（若有）；只在后面真有一条结果消息时才提示
     // 「结果见下一条」，否则（静音/时长过滤）只回「处理完成」
-    const t = messages(sessionLocale(sid));
     stopProgress(sid, willNotify ? t.receipt.done : t.receipt.doneOnly);
     if (!willNotify) return;
 
@@ -713,7 +717,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
         ];
         if (discoveredChatIds.size > 0) {
           lines.push(t.whoamiKnownChats);
-          for (const [cid] of discoveredChatIds) lines.push(`  - ${cid}`);
+          for (const cid of discoveredChatIds) lines.push(`  - ${cid}`);
         }
         lines.push(t.whoamiHint);
         ctx.ui.notify(lines.join('\n'), 'info');
@@ -726,7 +730,7 @@ export default function feishuNotifyExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(t.bindNoIds, 'warning');
           return;
         }
-        const result = persistDiscovered(ctx.cwd, cfg, discoveredUserId, [...discoveredChatIds.keys()]);
+        const result = persistDiscovered(ctx.cwd, cfg, discoveredUserId, [...discoveredChatIds]);
         if (result.ok) {
           const written = result.written?.join(', ') ?? '';
           ctx.ui.notify(format(t.bindWritten, { fields: written }), 'info');

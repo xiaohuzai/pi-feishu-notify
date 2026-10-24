@@ -36,16 +36,25 @@ export function loadDiscovered(): DiscoveredState {
   };
 }
 
-/** 合并记录一条识别结果（userId 覆盖，chatId 追加去重），写回磁盘。 */
+/** 合并记录一条识别结果（userId 覆盖，chatId 追加去重），有变化才写回磁盘。 */
 export function recordDiscovered(userId: string | undefined, chatId: string | undefined): void {
   mutateJson<DiscoveredState>(
     discoveredFile(),
     discoveredLock(),
-    () => ({ ...EMPTY }),
+    // 每次给全新对象/数组：避免 def 路径下 push 污染模块级 EMPTY 常量
+    () => ({ chatIds: [], updatedAt: 0 }),
     (st) => {
-      if (userId) st.userId = userId;
-      if (chatId && !st.chatIds.includes(chatId)) st.chatIds.push(chatId);
-      st.updatedAt = Date.now();
+      let changed = false;
+      if (userId && st.userId !== userId) {
+        st.userId = userId;
+        changed = true;
+      }
+      if (chatId && !st.chatIds.includes(chatId)) {
+        st.chatIds.push(chatId);
+        changed = true;
+      }
+      if (changed) st.updatedAt = Date.now();
+      return changed; // 无变化不写盘：上行消息每条都会走到这里，避免高频空转写
     },
   );
 }

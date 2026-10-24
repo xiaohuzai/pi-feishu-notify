@@ -162,12 +162,12 @@ class SdkFeishuClient implements FeishuClient {
     if (!this.cfg.appId || !this.cfg.appSecret) {
       return { ok: false, error: err.missingCredentials };
     }
-    const client = this.getClient();
     const receiveId = cfg.userId ?? cfg.chatId;
     const receiveIdType = cfg.userId ? 'open_id' : 'chat_id';
     if (!receiveId) {
       return { ok: false, error: err.missingTarget };
     }
+    const client = this.getClient();
     try {
       const response = await client.im.message.create({
         params: { receive_id_type: receiveIdType },
@@ -209,8 +209,12 @@ class SdkFeishuClient implements FeishuClient {
     markdown: string,
     cfg: FeishuTarget,
   ): Promise<SendResult> {
-    const to = resolveTarget(cfg);
     const err = messages(resolveLocale(this.cfg.locale)).error;
+    // 与 sendText 一致：先校验凭证，缺凭证时快速报错而不是白等长连接就绪超时
+    if (!this.cfg.appId || !this.cfg.appSecret) {
+      return { ok: false, error: err.missingCredentials };
+    }
+    const to = resolveTarget(cfg);
     if (!to) {
       return { ok: false, error: err.missingTarget };
     }
@@ -236,11 +240,8 @@ class SdkFeishuClient implements FeishuClient {
   }
 
   private async ensureConnectedChannel(): Promise<lark.LarkChannel> {
-    if (this.channel) {
-      const ready = await waitFor(() => this.connected, 8000);
-      if (ready && this.channel) return this.channel;
-    }
-    // 尚未建连：主动建一个（与 subscribe 共用 ensureChannel 逻辑）
+    // channel 已存在时 ensureChannel 是 no-op，统一等待一次连接就绪；
+    // 旧实现在 channel 存在但未连上时会重复等待两轮（最长 16s）才报错。
     this.ensureChannel();
     const ok = await waitFor(() => this.channel !== null && this.connected, 8000);
     if (!ok || !this.channel) {

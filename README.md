@@ -61,7 +61,7 @@ Add to `~/.pi/agent/settings.json` (global) or project `.pi/settings.json` (proj
 ```json
 {
   "feishu-notify": {
-    "enabled": true,
+    "enabled": true,                // master switch for auto notifications (reply-and-inject is governed by replyEnabled separately)
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
     "domain": "feishu",             // 'feishu' (default, China) | 'lark' (international)

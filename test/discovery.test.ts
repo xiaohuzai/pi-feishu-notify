@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { join } from 'node:path';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { isolateStateDir } from './isolate-state.js';
 import { stateDir } from '../src/state.js';
 import { loadDiscovered, recordDiscovered } from '../src/discovery.js';
@@ -47,5 +47,24 @@ describe('discovery 持久化', () => {
     recordDiscovered('ou_old', 'oc_chat');
     recordDiscovered('ou_new', 'oc_chat');
     expect(loadDiscovered().userId).toBe('ou_new');
+  });
+
+  it('重复记录相同值不写盘（updatedAt 不变，热路径零写）', () => {
+    recordDiscovered('ou_abc', 'oc_chat');
+    const before = readFileSync(join(stateDir(), 'feishu-notify-discovered.json'), 'utf8');
+    recordDiscovered('ou_abc', 'oc_chat');
+    recordDiscovered('ou_abc', undefined);
+    recordDiscovered(undefined, 'oc_chat');
+    const after = readFileSync(join(stateDir(), 'feishu-notify-discovered.json'), 'utf8');
+    expect(after).toBe(before);
+  });
+
+  it('有新值时仍会写盘', () => {
+    recordDiscovered('ou_abc', undefined);
+    const before = readFileSync(join(stateDir(), 'feishu-notify-discovered.json'), 'utf8');
+    recordDiscovered(undefined, 'oc_new_chat');
+    const after = readFileSync(join(stateDir(), 'feishu-notify-discovered.json'), 'utf8');
+    expect(after).not.toBe(before);
+    expect(loadDiscovered().chatIds).toContain('oc_new_chat');
   });
 });

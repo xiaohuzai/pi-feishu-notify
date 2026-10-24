@@ -126,15 +126,9 @@ export interface InboxEntry {
   cwd?: string;
   /** 转发方已发「正在转达」回执的 message_id（目标进程接管进度刷新用） */
   receiptMsgId?: string;
-  /** 回执开关（转发方配置的快照；目标会话无处投递时决定是否补发告知） */
-  receipt?: boolean;
   /** 回执语言（转发方解析好的，目标进程未必有该会话的配置） */
   locale?: 'en' | 'zh';
   /** 已转发跳数（防同项目回退在多进程间来回转发） */
   hops?: number;
-  /** 回复来源（目标会话无处投递时告知用户用） */
-  replyChatId?: string;
-  replySenderId?: string;
-  replyChatType?: string;
   ts: number;
 }

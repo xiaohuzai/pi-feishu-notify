@@ -61,12 +61,12 @@ export function withDirLock<T>(lockDir: string, fn: () => T): T | undefined {
   }
 }
 
-/** 读改写一个 JSON 文件，带目录锁。 */
+/** 读改写一个 JSON 文件，带目录锁。mutate 返回 false 表示无变化，跳过写盘。 */
 export function mutateJson<T>(
   file: string,
   lockDir: string,
   def: () => T,
-  mutate: (st: T) => void,
+  mutate: (st: T) => void | boolean,
   prune?: (st: T) => void,
 ): void {
   withDirLock(lockDir, () => {
@@ -77,7 +77,7 @@ export function mutateJson<T>(
       } catch {
         st = def();
       }
-      mutate(st);
+      if (mutate(st) === false) return;
       prune?.(st);
       mkdirSync(stateDir(), { recursive: true });
       const tmp = `${file}.${randomUUID()}.tmp`;

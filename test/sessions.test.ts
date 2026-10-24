@@ -105,4 +105,17 @@ describe('SessionRegistry', () => {
     reg.register('session-new', '/proj/new', 30);
     expect(reg.get('session-ancient')?.cwd).toBe('/proj/old');
   });
+
+  it('startedAt 非法的历史记录视为过期一并清理', () => {
+    writeFileSync(
+      join(stateDir(), 'feishu-notify-sessions.json'),
+      JSON.stringify({
+        'session-bad': { pid: 2147483647, cwd: '/proj/x', startedAt: 'not-a-date' },
+      }),
+    );
+    const reg = new SessionRegistry();
+    reg.register('session-new', '/proj/new', 7);
+    expect(reg.get('session-bad')).toBeUndefined();
+    expect(reg.get('session-new')).toBeDefined();
+  });
 });

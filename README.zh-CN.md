@@ -61,7 +61,7 @@ pi install ./path/to/pi-feishu-notify
 ```json
 {
   "feishu-notify": {
-    "enabled": true,
+    "enabled": true,                // 自动通知总开关（回复回注由 replyEnabled 单独控制，enabled=false 仍可回复旧通知）
     "appId": "${FEISHU_APP_ID}",
     "appSecret": "${FEISHU_APP_SECRET}",
     "domain": "feishu",             // 'feishu'（默认，国内）| 'lark'（国际版）

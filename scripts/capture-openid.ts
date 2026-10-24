@@ -4,12 +4,12 @@
 // Then send the bot any message in Feishu (e.g. "hello"); the script prints your open_id.
 import * as lark from '@larksuiteoapi/node-sdk';
 import { loadConfig } from '../src/config.js';
-import { resolveEnvVars } from '../src/config.js';
 
 async function main() {
+  // loadConfig 内部已完成 ${VAR} 环境变量展开
   const cfg = loadConfig(process.cwd());
-  const appId = resolveEnvVars(cfg.appId ?? '') as string;
-  const appSecret = resolveEnvVars(cfg.appSecret ?? '') as string;
+  const appId = cfg.appId ?? '';
+  const appSecret = cfg.appSecret ?? '';
   if (!appId || !appSecret) {
     console.error('Credentials not found: configure feishu-notify.appId / appSecret in settings.json first');
     process.exit(1);

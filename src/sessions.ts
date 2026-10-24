@@ -46,7 +46,8 @@ export class SessionRegistry {
             continue;
           }
           const started = Date.parse(e.startedAt);
-          if (Number.isFinite(started) && Date.now() - started > maxAgeMs) delete map[k];
+          // startedAt 非法（历史脏数据）视为最老记录，一并清理
+          if (!Number.isFinite(started) || Date.now() - started > maxAgeMs) delete map[k];
         }
         map[sid] = { pid: process.pid, cwd, startedAt: new Date().toISOString() };
       },

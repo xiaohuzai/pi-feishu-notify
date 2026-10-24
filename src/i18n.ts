@@ -202,8 +202,8 @@ const zh: I18nMessages = {
 /** 解析 locale 配置为具体语言。 */
 export function resolveLocale(setting: LocaleSetting | undefined): Locale {
   if (setting === 'en' || setting === 'zh') return setting;
-  // auto：按环境变量探测
-  const lang = (process.env.LANG ?? process.env.LC_ALL ?? process.env.LC_MESSAGES ?? '')
+  // auto：按环境变量探测（POSIX 优先级 LC_ALL > LC_MESSAGES > LANG）
+  const lang = (process.env.LC_ALL ?? process.env.LC_MESSAGES ?? process.env.LANG ?? '')
     .toLowerCase();
   return lang.startsWith('zh') ? 'zh' : 'en';
 }

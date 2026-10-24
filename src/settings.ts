@@ -4,8 +4,9 @@
  * 把自动识别的 userId / chatId 写入项目 .pi/settings.json 的 feishu-notify 节。
  * 只补写缺失字段，不覆盖已有配置，不触碰文件里其他配置。
  */
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import type { FeishuNotifyConfig } from './types.js';
 import { resolveLocale, messages } from './i18n.js';
 
@@ -55,7 +56,10 @@ export function persistDiscovered(
       return { ok: false, error: err.nothingToWrite };
     }
     mkdirSync(join(cwd, '.pi'), { recursive: true });
-    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    // 原子替换写入（tmp + rename）：直写 settings.json 若中途崩溃会留下损坏文件
+    const tmp = `${settingsPath}.${randomUUID()}.tmp`;
+    writeFileSync(tmp, JSON.stringify(settings, null, 2) + '\n', 'utf8');
+    renameSync(tmp, settingsPath);
     return { ok: true, written };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
