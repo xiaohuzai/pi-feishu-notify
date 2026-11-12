@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   release:
-    uses: xiaohuzai/release-flow/.github/workflows/release.yml@v1
+    uses: xiaohuzai/release-flow/.github/workflows/release.yml@8083ee4e81ad993c1e0c397426fbaaa743b6381e
     with:
       version: ${{ inputs.version }}
     secrets: inherit
